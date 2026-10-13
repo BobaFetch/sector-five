@@ -30,11 +30,20 @@ muse skills install ./plugin/skills/sector-five
 muse plugins marketplace add sector-five https://github.com/BobaFetch/sector-five.git
 muse plugins install sector-five@sector-five
 
+# Claude plugin (this checkout). Adds the marketplace, then installs.
+claude plugin install sector-five --marketplace .
+
+# Claude plugin via marketplace (once pushed)
+claude plugin marketplace add BobaFetch/sector-five
+claude plugin install sector-five@sector-five
+
 # Grok briefs: point --agent at plugin/grok/<name>.md, or copy the
 # directory into your Grok agents location.
 
 # Manual: clone and set SECTORFIVE_HOME to the checkout's `plugin/` directory.
 ```
+
+Inside Claude Code, the one-step install is `/plugin install sector-five --marketplace BobaFetch/sector-five`.
 
 Contract resolution (no absolute paths anywhere): `$SECTORFIVE_HOME`, else
 relative to the installed skill/brief, else `./plugin/contract.md`.

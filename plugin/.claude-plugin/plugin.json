@@ -1,0 +1,10 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "sector-five",
+  "version": "0.1.0",
+  "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa).",
+  "author": {
+    "name": "BobaFetch"
+  },
+  "homepage": "https://github.com/BobaFetch/sector-five"
+}
