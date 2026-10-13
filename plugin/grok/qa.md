@@ -24,6 +24,9 @@ Full operating contract: contract.md at the sector-five repo root (it overrides 
 - Check every diff against plan scope AND the ownership map.
 - Verify contracts changed exactly as planned, with migration covered.
 - Browser/e2e validation for user-facing flows.
+- Sweep for stale assertions: grep the whole test tree (unit, integration, e2e, smoke) for the old values the diff changed (routes, URLs, copy, config keys, redirect targets). Every match is updated or retired before you approve.
+- Copy checks scan rendered text plus `aria-label`, `title`, `alt`, and `placeholder`.
+- Before approving a push, review the diff adversarially, as an external reviewer would. Anything they would flag goes back to the owning role first.
 
 ## Never do
 

@@ -66,15 +66,31 @@ Lightning → backend, Aerith → frontend, Tifa → polish, Fina → qa.
 
 ## Dispatcher
 
+Set `TYPESAFE_API_KEY` for Jev, or `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_AUTH_TOKEN` for Clef. Shell exports work:
+
 ```sh
-cp plugin/.env.example plugin/.env  # add TYPESAFE_API_KEY; never commit .env
+export TYPESAFE_API_KEY="<Jev key>"
+# Or use Clef:
+export CLOUDFLARE_ACCOUNT_ID="<Cloudflare account ID>"
+export CLOUDFLARE_AUTH_TOKEN="<Cloudflare token>"
+```
+
+Or copy the example and add your values to the gitignored `plugin/.env`
+(never commit it). Then verify with `check`:
+
+```sh
+cp plugin/.env.example plugin/.env
+python3 plugin/tools/dispatch.py check
 python3 plugin/tools/dispatch.py route --task "Add cursor pagination to /orders"
 python3 plugin/tools/dispatch.py gate --state "<diff summary>" \
   --statement "This change is dangerous"
 ```
 
-Exit 0 routes/proceeds; 3 escalates (low confidence); 4 blocks (gate holds);
-2 is a usage or provider error. Full reference: `plugin/docs/runbook.md`.
+Exit 0 means ready/off, routed, proceed, or unrouted recorded; 3 escalates
+(low confidence); 4 blocks (gate holds); 2 is a usage or provider/probe error;
+5 means no credentials and 6 invalid config (`check` only).
+Full reference: [`plugin/docs/runbook.md`](plugin/docs/runbook.md).
 
 ## Update / rollback
 
@@ -86,6 +102,16 @@ sector-five`. Rollback: check out the previous tag. Tags are `vX.Y.Z`.
 In a working repo, the team scaffolds `.sectorfive/` on first contact
 (repo map, ownership map, contracts index, baseline, tech debt, decisions,
 plans, requests, dispatch log) per the contract's drop-in bootstrap.
+
+The first session runs an init interview covering dispatcher use, fallback
+behavior (`pinned` by default), and harness mode (`multi` or `single`).
+Confirmed choices go into `.sectorfive/config.json`. See the
+[contract's Init interview](plugin/contract.md#init-interview).
+
+Each session, planning checks readiness and opens with a banner such as
+`[planning] dispatch: jev ✓ · fallback: pinned · harness: multi`. It shows the
+provider and its state (`✓` ready, `✗` failed, `pending`, or `off`), the
+fallback mode, and the harness mode.
 
 ## Maintainer: releasing
 

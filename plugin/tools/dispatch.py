@@ -5,10 +5,12 @@ Stdlib-only. Reads keys from the environment or a gitignored `.env` at the
 sector-five repo root (never committed, never printed).
 
 Exit codes:
-  0  routed (route) / proceed (gate)
+  0  routed (route) / proceed (gate) / ready or off (check) / recorded (unrouted)
   2  usage or provider error (message on stderr)
-  3  escalate to the user (route confidence below threshold)
+  3  escalate to the user (route confidence below threshold, or --expect mismatch)
   4  blocked (gate statement holds at or above threshold)
+  5  no credentials (check)
+  6  invalid config.json (check)
 """
 import argparse
 import datetime
@@ -28,10 +30,13 @@ CLEF_URL_TMPL = (
 )
 
 ROLES = {
-    "backend": "Server logic, APIs, data models, schema, auth, infra, integrations.",
-    "frontend": "Screens, components, client state, routing, forms, API wiring.",
+    "backend": "Server logic, APIs, data models, schema, auth, infra, integrations, "
+               "telemetry, ops scripts; also fixes to these after a qa veto.",
+    "frontend": "Screens, components, client state, routing, forms, API wiring; "
+                "also fixes to these after a qa veto.",
     "polish": "Polish-only pass over a working flow: copy, spacing, a11y, tokens.",
-    "qa": "Tests, reviews, verification, e2e/browser validation, veto verdicts.",
+    "qa": "Writing tests and regression coverage, reviews, verification, "
+          "e2e/browser validation, veto verdicts.",
 }
 TIERS = {
     "flagship": "Hard or high-stakes work: use the role's pinned flagship model.",
@@ -155,11 +160,117 @@ def append_log(entry):
         fh.write(json.dumps(entry) + "\n")
 
 
+def load_config(path):
+    with open(path) as fh:
+        config = json.load(fh)
+    if not isinstance(config, dict):
+        raise ValueError("config must be an object")
+    if type(config.get("version")) is not int or config["version"] != 1:
+        raise ValueError("config version must be 1")
+    dispatcher = config.get("dispatcher")
+    if not isinstance(dispatcher, dict):
+        raise ValueError("dispatcher must be an object")
+    for field, choices in (
+        ("status", ("on", "pending", "off")),
+        ("provider", ("auto", "jev", "clef")),
+        ("fallbackMode", ("pinned", "ask", "block")),
+    ):
+        if dispatcher.get(field) not in choices:
+            raise ValueError("invalid dispatcher.%s" % field)
+    harness = config.get("harness")
+    if not isinstance(harness, dict):
+        raise ValueError("harness must be an object")
+    if harness.get("mode") not in ("multi", "single"):
+        raise ValueError("invalid harness.mode")
+    roles = harness.get("roles")
+    if not isinstance(roles, dict):
+        raise ValueError("harness.roles must be an object")
+    for role, assignment in roles.items():
+        if role not in ("planning", *ROLES):
+            raise ValueError("invalid harness role")
+        if not isinstance(assignment, str):
+            raise ValueError("harness role assignment must be a string")
+        model, separator, effort = assignment.partition(" @ ")
+        harness_name, slash, model_name = model.partition("/")
+        if not separator or not slash or not all(
+            part.strip() for part in (harness_name, model_name, effort)
+        ):
+            raise ValueError("harness role assignment must be harness/model @ effort")
+    return config
+
+
+def check_banner(config, provider, ready):
+    if config is None:
+        return
+    dispatcher = config["dispatcher"]
+    status = dispatcher["status"]
+    indicator = ("✓" if ready else "✗") if status == "on" else status
+    print("dispatch: %s %s · fallback: %s · harness: %s" % (
+        provider, indicator, dispatcher["fallbackMode"], config["harness"]["mode"]))
+
+
+def cmd_check(args):
+    config = None
+    path = args.config if args.config is not None else os.path.join(
+        os.getcwd(), ".sectorfive", "config.json")
+    if args.config is not None or os.path.lexists(path):
+        try:
+            config = load_config(path)
+        except (OSError, ValueError):
+            # JSON errors can contain config contents; report no input values.
+            print("dispatch: error: invalid config.json", file=sys.stderr)
+            return 6
+    provider = args.provider or (config["dispatcher"]["provider"] if config else "auto")
+    for key in ("TYPESAFE_API_KEY", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_AUTH_TOKEN"):
+        print("%s: %s" % (key, "present" if os.environ.get(key) else "missing"))
+    if config and config["dispatcher"]["status"] == "off":
+        check_banner(config, provider, True)
+        return 0
+    try:
+        name, call = decide_provider(provider)[0]
+    except RuntimeError:
+        check_banner(config, provider, False)
+        print("dispatch: error: no credentials for %s" % provider, file=sys.stderr)
+        return 5
+    questions = {
+        "check": {"type": "noul", "instructions": "Is the dispatcher available?"},
+    }
+    try:
+        answers = call("Sector 5 dispatcher readiness check.", questions, 30.0)
+        value = float(answers["check"]["noul"])
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("invalid probe answer")
+    except Exception:  # noqa: BLE001 - report no provider response or key material
+        check_banner(config, name, False)
+        print("dispatch: error: %s probe failed" % name, file=sys.stderr)
+        return 2
+    check_banner(config, name, True)
+    print("provider: %s ready" % name)
+    return 0
+
+
+def cmd_unrouted(args):
+    decision = {"kind": "unrouted", "verdict": "UNROUTED", "task": args.task}
+    if args.reason is not None:
+        decision["reason"] = args.reason
+    if not args.no_log:
+        append_log(dict(decision, task=args.task[:2000]))
+    if args.format == "json":
+        print(json.dumps(decision, indent=2))
+    else:
+        print("verdict: UNROUTED")
+    return 0
+
+
 def cmd_route(args):
     state = args.task
     if args.plan:
+        # Plans describe every step; label the step so the plan's dominant
+        # domain doesn't outvote the step being routed.
         with open(args.plan) as fh:
-            state += "\n\n--- plan ---\n" + fh.read()
+            state = ("Step to route: " + args.task +
+                     "\n\n--- plan context (route only the step above) ---\n" +
+                     fh.read())
     questions = {
         "role": {
             "type": "choice",
@@ -182,6 +293,7 @@ def cmd_route(args):
     tier = answers["tier"]
     difficulty = answers["difficulty"]
     confident = float(role.get("confidence", 0.0)) >= args.min_confidence
+    mismatch = args.expect is not None and role.get("choice") != args.expect
     decision = {
         "kind": "route",
         "provider": provider,
@@ -193,8 +305,11 @@ def cmd_route(args):
         "difficulty": difficulty.get("score"),
         "difficulty_confidence": difficulty.get("confidence"),
         "min_confidence": args.min_confidence,
-        "verdict": "routed" if confident else "escalate",
+        "verdict": "mismatch" if mismatch else (
+            "routed" if confident else "escalate"),
     }
+    if args.expect is not None:
+        decision["expected_role"] = args.expect
     if not args.no_log:
         append_log(dict(decision, task=state[:2000]))
     if args.format == "json":
@@ -208,8 +323,10 @@ def cmd_route(args):
             decision["tier"], tier.get("confidence") or 0.0))
         print("difficulty: %s (confidence %.2f)" % (
             decision["difficulty"], difficulty.get("confidence") or 0.0))
+        if mismatch:
+            print("expected: %s" % args.expect)
         print("verdict: %s" % decision["verdict"].upper())
-    return 0 if confident else 3
+    return 0 if confident and not mismatch else 3
 
 
 def cmd_gate(args):
@@ -254,6 +371,8 @@ def build_parser():
     route.add_argument("--task", required=True, help="task text (the state)")
     route.add_argument("--plan", help="optional plan file appended to the state")
     route.add_argument("--min-confidence", type=float, default=0.60)
+    route.add_argument("--expect", choices=sorted(ROLES),
+                       help="planned role from ownership; a different pick escalates")
     route.set_defaults(func=cmd_route)
     gate = sub.add_parser("gate", parents=[common],
                           help="yes/no gate over a state")
@@ -261,6 +380,18 @@ def build_parser():
     gate.add_argument("--statement", required=True)
     gate.add_argument("--threshold", type=float, default=0.5)
     gate.set_defaults(func=cmd_gate)
+    check = sub.add_parser("check", help="check credentials and probe without logging")
+    check.add_argument("--provider", choices=["auto", "jev", "clef"],
+                       help="decision provider (default: config provider or auto)")
+    check.add_argument("--config", help="config path (default: .sectorfive/config.json)")
+    check.set_defaults(func=cmd_check)
+    unrouted = sub.add_parser("unrouted", help="record a step assigned without dispatch")
+    unrouted.add_argument("--task", required=True, help="task text (the state)")
+    unrouted.add_argument("--reason", help="reason dispatch was unavailable")
+    unrouted.add_argument("--format", choices=["text", "json"], default="text")
+    unrouted.add_argument("--no-log", action="store_true",
+                          help="do not append to .sectorfive/dispatch-log.jsonl")
+    unrouted.set_defaults(func=cmd_unrouted)
     return parser
 
 
