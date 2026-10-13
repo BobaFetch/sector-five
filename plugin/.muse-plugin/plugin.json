@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "name": "sector-five",
+  "displayName": "Sector Five",
+  "version": "0.1.0",
+  "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa) using its operating contract, role boundaries, and handoff protocols.",
+  "compat": {
+    "source": "native",
+    "manifestDir": ".muse-plugin"
+  },
+  "capabilities": {
+    "skills": [
+      {
+        "id": "sector-five",
+        "path": "skills/sector-five/SKILL.md",
+        "enabledDefault": true
+      }
+    ],
+    "commands": [],
+    "hooks": [],
+    "mcpServers": [],
+    "reminders": []
+  }
+}

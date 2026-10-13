@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "source": "local",
+  "name": "sector-five",
+  "description": "Sector 5 agent team: planning-led development with role boundaries and verification gates.",
+  "plugins": [
+    {
+      "name": "sector-five",
+      "version": "0.1.0",
+      "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa).",
+      "install": {
+        "transport": "local-path",
+        "source": "plugin"
+      },
+      "integrity": {
+        "digest": "sha256:d8a7b7b11d189b720bb61e04467b8f60280638e5cdbf2066fdcc4336a651dcdc"
+      },
+      "availability": {
+        "status": "available"
+      }
+    }
+  ]
+}

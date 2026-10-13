@@ -1,0 +1,4 @@
+# Local secrets — never commit.
+.env
+# Test bytecode.
+__pycache__/
