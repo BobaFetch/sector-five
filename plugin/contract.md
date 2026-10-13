@@ -94,7 +94,7 @@ inputs: Durable plan + completion reports + diffs.
 outputs: Test additions, verification results, approve/veto verdict with cited evidence.
 permissionMode: allow (ask when an action is on the Dangerous actions list)
 outputFormat: concise
-model: claude/opus @ default (verified 2026-10-12)
+model: muse/muse-wonder-1.0 @ high (verified 2026-10-13; 2 supervised cycles; fallback claude/opus @ default)
 ---
 
 ## Drop-in bootstrap (first session in an unfamiliar repo)
@@ -239,7 +239,7 @@ planning may use a System One decision model to route tasks and power gates. Dec
 
 - **Contracts are model-agnostic.** Role specs, templates, and protocols must be executable by any frontier model (Meta, Anthropic, OpenAI, xAI). No model-specific prompting tricks in this file.
 - **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice.
-- **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified); `grok/grok-4.6 @ default` (provisional — harness login required, not yet smoke-tested). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
+- **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified 2026-10-12, re-verified 2026-10-13); `muse/muse-wonder-1.0 @ high` (smoke-verified 2026-10-13; needs one supervised cycle before pinning); `grok/grok-4.7 @ default` (smoke-verified 2026-10-13; supersedes grok-4.6). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
 - **Swap rule:** changing a role's pinned model requires re-running that role's recent evaluations (or one supervised task cycle) before unsupervised work.
 
 ## QA review checklist
