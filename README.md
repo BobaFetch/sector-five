@@ -85,7 +85,11 @@ plans, requests, dispatch log) per the contract's drop-in bootstrap.
 
 ```sh
 cd plugin && python3 -B -m unittest discover -s tests  # must be green
-muse plugins install ./plugin --json  # read installed.package_sha256
+# commit any plugin/ changes first, then hash a CLEAN checkout:
+# local plugin/.env is hashed but never published, so hashing the
+# worktree poisons the digest and marketplace installs fail integrity.
+rm -rf /tmp/s5-digest && git clone -q . /tmp/s5-digest
+muse plugins install /tmp/s5-digest/plugin --json  # read installed.package_sha256
 muse plugins remove sector-five
-# write the digest into marketplace.json, then commit + tag
+# write the digest into marketplace.json, commit, tag
 ```
