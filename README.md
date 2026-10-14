@@ -119,12 +119,25 @@ fallback mode, and the harness mode.
 `plugin/` invalidates it — recompute before tagging:
 
 ```sh
-cd plugin && python3 -B -m unittest discover -s tests  # must be green
-# commit any plugin/ changes first, then hash a CLEAN checkout:
-# local plugin/.env is hashed but never published, so hashing the
+(cd plugin && python3 -B -m unittest discover -s tests)  # must be green
+# Bump the version in plugin/.claude-plugin/plugin.json,
+# plugin/.muse-plugin/plugin.json, .claude-plugin/marketplace.json and
+# marketplace.json, then commit any plugin/ changes. Hash a CLEAN
+# checkout: plugin/.env is hashed but never published, so hashing the
 # worktree poisons the digest and marketplace installs fail integrity.
-rm -rf /tmp/s5-digest && git clone -q . /tmp/s5-digest
-muse plugins install /tmp/s5-digest/plugin --json  # read installed.package_sha256
-muse plugins remove sector-five
-# write the digest into marketplace.json, commit, tag
+S=$(mktemp -d)
+git clone -q . "$S/repo"
+# Install into a throwaway HOME so your real muse install (the one your
+# working repos use) is never replaced or removed.
+HOME="$S/home" XDG_CONFIG_HOME="$S/home/.config" \
+  XDG_DATA_HOME="$S/home/.local/share" XDG_CACHE_HOME="$S/home/.cache" \
+  muse plugins install "$S/repo/plugin" --json | grep package_sha256
+rm -rf "$S"
+# Write the digest into marketplace.json, commit, then tag and push.
 ```
+
+Sanity check: re-hashing the previous tag the same way must reproduce its
+published digest. Files outside `plugin/` (README, ROADMAP) don't affect the
+digest. After pushing, refresh installs with
+`claude plugin marketplace update sector-five` and
+`muse plugins update sector-five`.
