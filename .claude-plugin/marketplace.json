@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "sector-five",
+  "description": "Sector 5 agent team: planning-led development with role boundaries and verification gates.",
+  "owner": {
+    "name": "BobaFetch"
+  },
+  "plugins": [
+    {
+      "name": "sector-five",
+      "version": "0.2.0",
+      "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa).",
+      "author": {
+        "name": "BobaFetch"
+      },
+      "source": "./plugin",
+      "homepage": "https://github.com/BobaFetch/sector-five"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v3. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v4.1. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -94,7 +94,7 @@ inputs: Durable plan + completion reports + diffs.
 outputs: Test additions, verification results, approve/veto verdict with cited evidence.
 permissionMode: allow (ask when an action is on the Dangerous actions list)
 outputFormat: concise
-model: claude/opus @ default (verified 2026-10-12)
+model: muse/muse-wonder-1.0 @ high (verified 2026-10-13; 2 supervised cycles; fallback claude/opus @ default)
 ---
 
 ## Drop-in bootstrap (first session in an unfamiliar repo)
@@ -107,6 +107,40 @@ Any agent landing in a repo with no `.sectorfive/` context runs this before feat
 4. **Infer ownership.** Draft `.sectorfive/ownership.md` mapping directories/files to backend/frontend/polish/qa per the role boundaries. planning approves; ambiguous paths are assigned explicitly, never shared by default.
 5. **Index contracts.** Record API surfaces, shared types/schemas, and auth boundaries in `.sectorfive/contracts.md` (pointers to source files, not copies).
 6. **Seed logs.** Create `.sectorfive/tech-debt.md` and `.sectorfive/decisions.md` with any findings from steps 2–5.
+7. **Init interview.** planning asks the user the questions below, shows a summary, and writes `.sectorfive/config.json` only after the user confirms. The choices are recorded in `decisions.md`. Re-run on request, or when `config.json` is missing or invalid.
+
+### Init interview
+
+```
+Q1  Use the decision dispatcher for routing and gates?              [recommended: yes]
+ ├─ yes → `dispatch.py check` (credentials + live probe, no logging)
+ │   ├─ ready → dispatcher.status = "on"
+ │   └─ not ready → show key setup: TYPESAFE_API_KEY (Jev) via shell export or the
+ │        gitignored `.env` at the plugin root (never commit it), then offer:
+ │        a) I've added it → re-run check
+ │        b) Use Clef → CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_AUTH_TOKEN → re-run check
+ │        c) Continue without it for now → dispatcher.status = "pending"
+ │   Q2  If the dispatcher can't answer mid-run, what happens?
+ │        • pinned: planning assigns the planned role on its pinned default and flags the step "unrouted"   [default]
+ │        • ask: planning stops and the user picks the role
+ │        • block: no dispatch until the dispatcher works
+ └─ no  → dispatcher.status = "off"; planning assigns roles directly
+Q3  Harness mode. Before asking, probe which harness CLIs are installed and signed in, and show
+    each role's pinned default next to what is available.
+ ├─ multi: each role runs on its pinned harness; a missing harness → a verified equivalent
+ │         (recorded) or that role is blocked                          [recommended]
+ └─ single: every role runs in the current harness; per-role substitutions recorded
+```
+
+`.sectorfive/config.json`:
+
+```json
+{
+  "version": 1,
+  "dispatcher": { "status": "on | pending | off", "provider": "auto | jev | clef", "fallbackMode": "pinned | ask | block" },
+  "harness": { "mode": "multi | single", "roles": { "<role>": "<harness>/<model> @ <effort>" } }
+}
+```
 
 Scaffold `.sectorfive/` when missing — never work from memory when a durable note would do.
 
@@ -122,6 +156,7 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 | `decisions.md` | planning | Scope and design decisions with date + rationale |
 | `plans/` | planning | Durable plans, one file per plan |
 | `requests/` | planning | Cross-domain requests and their resolutions |
+| `config.json` | planning | Init interview answers: dispatcher status/provider/fallbackMode, harness mode + role assignments |
 | `dispatch-log.jsonl` | planning | Decision-model routing/gate outcomes (append-only) |
 
 ## Operating protocols
@@ -131,6 +166,7 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 1. Read your role section in this file plus `ownership.md`, the active plan in `plans/`, and `baseline.md`.
 2. Confirm your task's scope, non-goals, and verification steps from the plan — not from chat memory.
 3. Confirm no other agent is working your files (planning sequences; when in doubt, ask).
+4. **planning only:** read `config.json`, run `dispatch.py check`, and open with a one-line mode banner, e.g. `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi (grok missing → muse)`. When status is `pending`, ask again for credentials. A mode that differs from `config.json` is always stated, never applied silently.
 
 ### Phase order
 
@@ -219,7 +255,7 @@ Follow-ups / tech debt: <or "none">
 
 ## Decision-model dispatcher (Jev-first, Clef-compatible)
 
-planning may use a System One decision model to route tasks and power gates. Decision models return structured answers code can branch on — they assist the dispatcher; they never replace agent judgment. The reference implementation is `tools/dispatch.py` (stdlib-only Python 3).
+When `config.json` has `dispatcher.status: "on"`, planning **must** route every plan step through the dispatcher before assigning its role and model. Under `pending` or `off`, planning assigns roles directly and says so in the banner. A System One decision model routes tasks and powers gates. Decision models return structured answers code can branch on — they assist the dispatcher; they never replace agent judgment. The reference implementation is `tools/dispatch.py` (stdlib-only Python 3).
 
 | Primitive | Use in Sector 5 |
 | --- | --- |
@@ -230,6 +266,8 @@ planning may use a System One decision model to route tasks and power gates. Dec
 **Policy:**
 
 - High-confidence `choice` → dispatch to the chosen agent with the durable plan. Low-confidence (below `--min-confidence`, default 0.60) → escalate to the user instead of misrouting (`dispatch.py route` exits 3).
+- planning passes the role it planned from `ownership.md` as `--expect <role>`. If the dispatcher picks a different role, the verdict is `mismatch` (exit 3), even at high confidence. planning then resolves it from the ownership map or asks the user. It never dispatches on the pick alone. The log keeps `expected_role` for recalibration.
+- Dispatcher unavailable (no credentials, provider error, `dispatch.py` exits 2) → apply `fallbackMode` and say so: `pinned` assigns the planned role on its pinned default and marks the step **unrouted** in the plan and the log; `ask` stops for the user; `block` holds the step. Never a silent fallback.
 - `noul` gates run before dangerous actions and at qa's review; a "yes" on danger/scope-breach blocks until planning rules (`dispatch.py gate` exits 4).
 - Up to 64 questions per request; keep dispatcher state factual (task text + plan + diff summary).
 - Outcomes append to `.sectorfive/dispatch-log.jsonl` in the working repo when `.sectorfive/` exists, for later recalibration.
@@ -239,22 +277,29 @@ planning may use a System One decision model to route tasks and power gates. Dec
 
 - **Contracts are model-agnostic.** Role specs, templates, and protocols must be executable by any frontier model (Meta, Anthropic, OpenAI, xAI). No model-specific prompting tricks in this file.
 - **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice.
-- **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified); `grok/grok-4.6 @ default` (provisional — harness login required, not yet smoke-tested). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
+- **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified 2026-10-12, re-verified 2026-10-13); `muse/muse-wonder-1.0 @ high` (smoke-verified 2026-10-13; needs one supervised cycle before pinning); `grok/grok-4.7 @ default` (smoke-verified 2026-10-13; supersedes grok-4.6). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
 - **Swap rule:** changing a role's pinned model requires re-running that role's recent evaluations (or one supervised task cycle) before unsupervised work.
+- **Writable harness for writing roles.** backend, frontend, polish, and qa must run with workspace write access. Several CLIs default to read-only in non-interactive mode and then silently return analysis instead of edits. Use `codex exec --sandbox workspace-write ...` and `claude -p --permission-mode acceptEdits ...`. On muse or grok, pass the CLI's equivalent workspace-write permission and record it in `decisions.md` on first use. Never use full-access or bypass modes without recorded approval.
+- **Empty diff = failed step.** When an implementation step returns, planning checks `git status`/`git diff` in the step's worktree. No changes in the assigned paths means the step failed (usually a read-only sandbox). Re-dispatch it; never accept it as complete.
 
 ## QA review checklist
 
 - [ ] Diff confined to plan scope and assignee ownership (check `ownership.md`).
 - [ ] Contracts unchanged or changed exactly as planned, with migration verified.
 - [ ] Tests cover the new/changed behavior; no weakened or deleted coverage without plan approval.
+- [ ] Existing assertions still match the new behavior. Search the whole test tree (unit, integration, e2e, smoke) for the old values the diff changed: routes, URLs, copy, config keys, and redirect targets. Update or retire every stale assertion, not just the tests next to the diff.
+- [ ] User-facing copy checks scan rendered text and the accessible attributes `aria-label`, `title`, `alt`, and `placeholder`.
+- [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human). Any finding they would raise is fixed through the owning role before push.
 - [ ] Baseline commands pass with no new warnings; browser/e2e validation done for user-facing flows.
 - [ ] No dangerous action taken without recorded approval.
 - [ ] Completion report present and accurate.
 
-**Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
+**Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
 
+- v4.1: writing roles run on a writable harness (`codex exec --sandbox workspace-write`), and an empty diff counts as a failed step. The qa checklist adds a stale-assertion sweep, accessible-attribute copy scans, and an adversarial pre-PR review. Dispatcher role criteria assign product-code fixes to the role that owns the files and test-writing to qa. (Lessons from the kiaora rollout, 2026-10-13.)
+- v4: dispatch required when enabled; init interview (dispatcher on/pending/off, Clef option, fallbackMode default `pinned`, multi/single harness) persisted to `.sectorfive/config.json`; planning startup mode banner; unrouted steps flagged; qa veto for unflagged unrouted dispatch.
 - v3: generic role names (planning/backend/frontend/polish/qa); pinned (harness, model, effort) defaults with live verification; Jev-first dispatcher with `tools/dispatch.py` reference implementation, confidence threshold, tier choice, and outcome log; install-relative contract resolution (no absolute paths); `dispatch-log.jsonl` in `.sectorfive/` schema.
 - v2.1: agents prefix user-visible chat responses with `[name]`; file contents unprefixed.
 - v2: explicit ownership boundaries; polish as post-frontend phase; drop-in bootstrap + `.sectorfive/` schema; startup/completion rituals; cross-domain handoff and durable plan templates; definition of done; dangerous-actions list; regression rules; decision-model dispatcher; model policy; qa checklist and veto powers.

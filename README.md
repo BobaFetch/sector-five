@@ -30,11 +30,20 @@ muse skills install ./plugin/skills/sector-five
 muse plugins marketplace add sector-five https://github.com/BobaFetch/sector-five.git
 muse plugins install sector-five@sector-five
 
+# Claude plugin (this checkout). Adds the marketplace, then installs.
+claude plugin install sector-five --marketplace .
+
+# Claude plugin via marketplace (once pushed)
+claude plugin marketplace add BobaFetch/sector-five
+claude plugin install sector-five@sector-five
+
 # Grok briefs: point --agent at plugin/grok/<name>.md, or copy the
 # directory into your Grok agents location.
 
 # Manual: clone and set SECTORFIVE_HOME to the checkout's `plugin/` directory.
 ```
+
+Inside Claude Code, the one-step install is `/plugin install sector-five --marketplace BobaFetch/sector-five`.
 
 Contract resolution (no absolute paths anywhere): `$SECTORFIVE_HOME`, else
 relative to the installed skill/brief, else `./plugin/contract.md`.
@@ -57,15 +66,31 @@ Lightning → backend, Aerith → frontend, Tifa → polish, Fina → qa.
 
 ## Dispatcher
 
+Set `TYPESAFE_API_KEY` for Jev, or `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_AUTH_TOKEN` for Clef. Shell exports work:
+
 ```sh
-cp plugin/.env.example plugin/.env  # add TYPESAFE_API_KEY; never commit .env
+export TYPESAFE_API_KEY="<Jev key>"
+# Or use Clef:
+export CLOUDFLARE_ACCOUNT_ID="<Cloudflare account ID>"
+export CLOUDFLARE_AUTH_TOKEN="<Cloudflare token>"
+```
+
+Or copy the example and add your values to the gitignored `plugin/.env`
+(never commit it). Then verify with `check`:
+
+```sh
+cp plugin/.env.example plugin/.env
+python3 plugin/tools/dispatch.py check
 python3 plugin/tools/dispatch.py route --task "Add cursor pagination to /orders"
 python3 plugin/tools/dispatch.py gate --state "<diff summary>" \
   --statement "This change is dangerous"
 ```
 
-Exit 0 routes/proceeds; 3 escalates (low confidence); 4 blocks (gate holds);
-2 is a usage or provider error. Full reference: `plugin/docs/runbook.md`.
+Exit 0 means ready/off, routed, proceed, or unrouted recorded; 3 escalates
+(low confidence); 4 blocks (gate holds); 2 is a usage or provider/probe error;
+5 means no credentials and 6 invalid config (`check` only).
+Full reference: [`plugin/docs/runbook.md`](plugin/docs/runbook.md).
 
 ## Update / rollback
 
@@ -78,18 +103,41 @@ In a working repo, the team scaffolds `.sectorfive/` on first contact
 (repo map, ownership map, contracts index, baseline, tech debt, decisions,
 plans, requests, dispatch log) per the contract's drop-in bootstrap.
 
+The first session runs an init interview covering dispatcher use, fallback
+behavior (`pinned` by default), and harness mode (`multi` or `single`).
+Confirmed choices go into `.sectorfive/config.json`. See the
+[contract's Init interview](plugin/contract.md#init-interview).
+
+Each session, planning checks readiness and opens with a banner such as
+`[planning] dispatch: jev ✓ · fallback: pinned · harness: multi`. It shows the
+provider and its state (`✓` ready, `✗` failed, `pending`, or `off`), the
+fallback mode, and the harness mode.
+
 ## Maintainer: releasing
 
 `marketplace.json` pins an integrity digest over `plugin/`. Any change under
 `plugin/` invalidates it — recompute before tagging:
 
 ```sh
-cd plugin && python3 -B -m unittest discover -s tests  # must be green
-# commit any plugin/ changes first, then hash a CLEAN checkout:
-# local plugin/.env is hashed but never published, so hashing the
+(cd plugin && python3 -B -m unittest discover -s tests)  # must be green
+# Bump the version in plugin/.claude-plugin/plugin.json,
+# plugin/.muse-plugin/plugin.json, .claude-plugin/marketplace.json and
+# marketplace.json, then commit any plugin/ changes. Hash a CLEAN
+# checkout: plugin/.env is hashed but never published, so hashing the
 # worktree poisons the digest and marketplace installs fail integrity.
-rm -rf /tmp/s5-digest && git clone -q . /tmp/s5-digest
-muse plugins install /tmp/s5-digest/plugin --json  # read installed.package_sha256
-muse plugins remove sector-five
-# write the digest into marketplace.json, commit, tag
+S=$(mktemp -d)
+git clone -q . "$S/repo"
+# Install into a throwaway HOME so your real muse install (the one your
+# working repos use) is never replaced or removed.
+HOME="$S/home" XDG_CONFIG_HOME="$S/home/.config" \
+  XDG_DATA_HOME="$S/home/.local/share" XDG_CACHE_HOME="$S/home/.cache" \
+  muse plugins install "$S/repo/plugin" --json | grep package_sha256
+rm -rf "$S"
+# Write the digest into marketplace.json, commit, then tag and push.
 ```
+
+Sanity check: re-hashing the previous tag the same way must reproduce its
+published digest. Files outside `plugin/` (README, ROADMAP) don't affect the
+digest. After pushing, refresh installs with
+`claude plugin marketplace update sector-five` and
+`muse plugins update sector-five`.
