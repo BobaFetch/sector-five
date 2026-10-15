@@ -42,4 +42,4 @@ Out-of-scope files touched; unplanned contract break; red or skipped verificatio
 
 ## Done
 
-Test additions + verification results + an approve/veto verdict with cited evidence, returned to planning.
+Test additions + verification results + an approve/veto verdict with cited evidence, returned to planning. Give a verdict only on a completed CI run, and record it on the work item with the SHA you reviewed: `python3 tools/dispatch.py work set --issue <key> qa.verdict=approve qa.sha=<head sha> qa.report=<path>`.

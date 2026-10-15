@@ -505,3 +505,375 @@ class UnroutedTest(WorkRepoCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def pr_facts(**overrides):
+    facts = {
+        "pr": 12, "title": "fix: thing. ENG-1", "isDraft": False,
+        "headSha": "abc123def456",
+        "body": "## Summary\nx\n\nResolves ENG-1\n\n## Plan\np\n\n## Verification\nv",
+        "checks": [{"name": "build", "status": "success"},
+                   {"name": "test", "status": "success"}],
+        "comments": [{"author": "greptile-apps", "body": "Confidence Score: 5/5"}],
+        "threads": [{"resolved": True, "outdated": False,
+                     "author": "greptile-apps", "body": "P2: nit"}],
+        "files": [".plans/done/2026-eng-1-thing.md", "src/a.ts"],
+        "changedFiles": ["src/a.ts (+3 -1)"],
+        "diff": "diff --git a/src/a.ts b/src/a.ts\n+x\n",
+    }
+    facts.update(overrides)
+    return facts
+
+
+FULL_RULES = {
+    "version": 1,
+    "checks": {
+        "ci": {}, "reviewThreads": {}, "qa": {}, "draft": {},
+        "botScore": {"author": "greptile", "pattern": r"Confidence Score: (\d+)/5",
+                     "min": 5},
+        "planFile": {"glob": ".plans/done/*{issue}*.md"},
+        "prBody": {"sections": ["Summary", "Resolves", "Plan", "Verification"]},
+    },
+}
+
+
+class RulesValidationTest(unittest.TestCase):
+    def test_full_rules_valid(self):
+        dispatch.validate_rules(FULL_RULES)
+
+    def test_defaults_valid(self):
+        dispatch.validate_rules(dispatch.DEFAULT_RULES)
+
+    def test_rejects_bad_rules(self):
+        bad = [
+            [],
+            {"version": 2},
+            {"version": 1, "extra": 1},
+            {"version": 1, "checks": {"lint": {}}},
+            {"version": 1, "checks": {"ci": {"allowPreexisting": "yes"}}},
+            {"version": 1, "checks": {"ci": {"ignore": [1]}}},
+            {"version": 1, "checks": {"ci": {"typo": True}}},
+            {"version": 1, "checks": {"botScore": {"author": "g", "min": 5}}},
+            {"version": 1, "checks": {"botScore": {"author": "g", "pattern": "x",
+                                                   "min": 5}}},
+            {"version": 1, "checks": {"botScore": {"author": "g", "pattern": "(",
+                                                   "min": 5}}},
+            {"version": 1, "checks": {"botScore": {"author": "g", "pattern": "(x)",
+                                                   "min": True}}},
+            {"version": 1, "checks": {"planFile": {}}},
+            {"version": 1, "checks": {"prBody": {"sections": []}}},
+            {"version": 1, "judgments": [{"id": "a"}]},
+            {"version": 1, "judgments": [{"id": "Bad Id", "statement": "s"}]},
+            {"version": 1, "judgments": [{"id": "a", "statement": "s"},
+                                         {"id": "a", "statement": "t"}]},
+            {"version": 1, "judgments": [{"id": "a", "statement": "s",
+                                          "threshold": 0}]},
+            {"version": 1, "judgments": [{"id": "a", "statement": "s",
+                                          "evidence": ["logs"]}]},
+            {"version": 1, "judgment": {"onUnavailable": "ignore"}},
+            {"version": 1, "judgment": {"maxStateChars": 10}},
+        ]
+        for rules in bad:
+            with self.subTest(rules=rules):
+                with self.assertRaises(ValueError):
+                    dispatch.validate_rules(rules)
+
+
+class FactsTest(unittest.TestCase):
+    ITEM = {"issue": "ENG-1", "qa": {"verdict": "approve", "sha": "abc123def456"},
+            "ci": {"preexisting": []}}
+
+    def statuses(self, facts, rules=FULL_RULES, item=ITEM):
+        return {k: v["status"] for k, v in
+                dispatch.evaluate_facts(rules, facts, item).items()}
+
+    def test_all_pass(self):
+        self.assertEqual(set(self.statuses(pr_facts()).values()), {"pass"})
+
+    def test_ci_pending_failed_and_none(self):
+        running = pr_facts(checks=[{"name": "build", "status": "pending"}])
+        self.assertEqual(self.statuses(running)["ci"], "pending")
+        red = pr_facts(checks=[{"name": "build", "status": "failure"},
+                               {"name": "test", "status": "pending"}])
+        self.assertEqual(self.statuses(red)["ci"], "fail")
+        self.assertEqual(self.statuses(pr_facts(checks=[]))["ci"], "pending")
+
+    def test_ci_ignore_required_and_preexisting(self):
+        red = pr_facts(checks=[{"name": "build", "status": "success"},
+                               {"name": "flaky", "status": "failure"}])
+        rules = {"version": 1, "checks": {"ci": {"ignore": ["flaky"]}}}
+        self.assertEqual(self.statuses(red, rules)["ci"], "pass")
+        rules = {"version": 1, "checks": {"ci": {"allowPreexisting": True}}}
+        item = dict(self.ITEM, ci={"preexisting": ["flaky"]})
+        self.assertEqual(self.statuses(red, rules, item)["ci"], "pass")
+        self.assertEqual(self.statuses(red, rules)["ci"], "fail")
+        rules = {"version": 1, "checks": {"ci": {"required": ["e2e"]}}}
+        self.assertEqual(self.statuses(pr_facts(), rules)["ci"], "fail")
+
+    def test_unresolved_threads(self):
+        facts = pr_facts(threads=[{"resolved": False, "outdated": True,
+                                   "author": "g", "body": "b"}])
+        self.assertEqual(self.statuses(facts)["reviewThreads"], "fail")
+        rules = {"version": 1, "checks": {"reviewThreads": {"ignoreOutdated": True}}}
+        self.assertEqual(self.statuses(facts, rules)["reviewThreads"], "pass")
+
+    def test_bot_score_uses_latest_and_waits(self):
+        facts = pr_facts(comments=[
+            {"author": "greptile-apps", "body": "Confidence Score: 5/5"},
+            {"author": "greptile-apps", "body": "Confidence Score: 3/5"}])
+        self.assertEqual(self.statuses(facts)["botScore"], "fail")
+        facts = pr_facts(comments=[{"author": "someone", "body": "Confidence Score: 5/5"}])
+        self.assertEqual(self.statuses(facts)["botScore"], "pending")
+
+    def test_plan_file_body_qa_draft(self):
+        facts = pr_facts(files=["src/a.ts"], body="## Summary", isDraft=True,
+                         headSha="ffff")
+        result = self.statuses(facts)
+        self.assertEqual(result["planFile"], "fail")
+        self.assertEqual(result["prBody"], "fail")
+        self.assertEqual(result["qa"], "fail")  # approved a different SHA
+        self.assertEqual(result["draft"], "fail")
+        self.assertEqual(self.statuses(pr_facts(), item=None)["qa"], "fail")
+
+    def test_plan_glob_case(self):
+        facts = pr_facts(files=[".plans/done/2026-ENG-1-x.md"])
+        self.assertEqual(self.statuses(facts)["planFile"], "pass")
+        rules = {"version": 1, "checks": {"planFile": {
+            "glob": ".plans/done/*{issue}*.md", "caseInsensitive": False}}}
+        facts = pr_facts(files=[".plans/done/2026-eng-1-x.md"])
+        self.assertEqual(self.statuses(facts, rules)["planFile"], "fail")
+
+
+class FitDiffTest(unittest.TestCase):
+    def test_every_file_keeps_a_share(self):
+        big = "diff --git a/src/a b/src/a\n" + "+" * 5000 + "\n"
+        tests = "diff --git a/test/a b/test/a\n+it('works')\n"
+        out = dispatch.fit_diff(big + tests, 1000)
+        self.assertLessEqual(len(out), 1000)
+        self.assertIn("test/a", out)
+        self.assertIn("it('works')", out)
+        self.assertIn("[trimmed]", out)
+
+    def test_small_diff_untouched(self):
+        self.assertEqual(dispatch.fit_diff("diff --git a b\n+x\n", 100),
+                         "diff --git a b\n+x\n")
+
+
+class WorkTest(WorkRepoCase):
+    def work(self, *argv):
+        return self.run_main(["work", *argv])
+
+    def item(self):
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            return json.load(fh)
+
+    def test_lifecycle_with_gates(self):
+        self.assertEqual(self.work("new", "--issue", "ENG-1",
+                                   "--plan", ".sectorfive/plans/eng-1.md")[0], 0)
+        code, out, _ = self.work("advance", "--issue", "ENG-1", "--to", "building")
+        self.assertEqual(code, 4)
+        self.assertIn("no owner recorded", out)
+        self.work("set", "--issue", "ENG-1", "owner=frontend", "branch=fix/eng-1")
+        self.assertEqual(self.work("advance", "--issue", "ENG-1",
+                                   "--to", "building")[0], 0)
+        self.assertEqual(self.work("advance", "--issue", "ENG-1",
+                                   "--to", "open")[0], 4)  # skips review
+        self.assertEqual(self.work("advance", "--issue", "ENG-1",
+                                   "--to", "review")[0], 0)
+        code, out, _ = self.work("advance", "--issue", "ENG-1", "--to", "open")
+        self.assertEqual(code, 4)
+        self.assertIn("no qa approve", out)
+        self.work("set", "--issue", "ENG-1", "pr=12", "qa.verdict=approve",
+                  "qa.sha=abc123def456")
+        self.assertEqual(self.work("advance", "--issue", "ENG-1", "--to", "open")[0], 0)
+        code, out, _ = self.work("advance", "--issue", "ENG-1", "--to", "done")
+        self.assertEqual(code, 4)
+        self.assertIn("done check has not passed", out)
+        self.assertEqual(self.item()["phase"], "open")
+        self.assertEqual([h["to"] for h in self.item()["history"]],
+                         ["planned", "building", "review", "open"])
+
+    def test_rework_and_blocked(self):
+        self.work("new", "--issue", "ENG-1", "--plan", "p.md")
+        self.work("set", "--issue", "ENG-1", "owner=backend", "branch=b")
+        self.work("advance", "--issue", "ENG-1", "--to", "building")
+        self.work("advance", "--issue", "ENG-1", "--to", "review")
+        self.assertEqual(self.work("advance", "--issue", "ENG-1",
+                                   "--to", "building")[0], 0)  # veto rework
+        self.assertEqual(self.work("advance", "--issue", "ENG-1",
+                                   "--to", "blocked")[0], 2)  # needs --note
+        self.assertEqual(self.work("advance", "--issue", "ENG-1", "--to", "blocked",
+                                   "--note", "env down")[0], 0)
+        self.assertEqual(self.work("advance", "--issue", "ENG-1",
+                                   "--to", "review")[0], 0)
+
+    def test_dispatcher_on_requires_routed_issue(self):
+        self.write_config(make_config(status="on"))
+        self.work("new", "--issue", "ENG-1", "--plan", "p.md")
+        self.work("set", "--issue", "ENG-1", "owner=qa")
+        code, out, _ = self.work("advance", "--issue", "ENG-1", "--to", "building")
+        self.assertEqual(code, 4)
+        self.assertIn("no route/unrouted line", out)
+        self.run_main(["unrouted", "--task", "t", "--issue", "ENG-1"])
+        self.assertEqual(self.work("advance", "--issue", "ENG-1",
+                                   "--to", "building")[0], 0)
+
+    def test_set_validates(self):
+        self.work("new", "--issue", "ENG-1")
+        for pair in ("owner=planning", "pr=abc", "qa.verdict=ok", "color=red", "x"):
+            with self.subTest(pair=pair):
+                self.assertEqual(self.work("set", "--issue", "ENG-1", pair)[0], 2)
+        self.assertEqual(self.work("set", "--issue", "ENG-1",
+                                   "ci.preexisting=e2e, lint")[0], 0)
+        self.assertEqual(self.item()["ci"]["preexisting"], ["e2e", "lint"])
+
+    def test_bad_issue_key_and_duplicates(self):
+        self.assertEqual(self.work("new", "--issue", "../x")[0], 2)
+        self.work("new", "--issue", "ENG-1")
+        self.assertEqual(self.work("new", "--issue", "ENG-1")[0], 2)
+
+    def test_show(self):
+        self.work("new", "--issue", "ENG-1")
+        self.work("new", "--issue", "ENG-2")
+        code, out, _ = self.work("show")
+        self.assertEqual(code, 0)
+        self.assertIn("ENG-1\tplanned", out)
+        self.assertIn("ENG-2\tplanned", out)
+
+
+class DoneCmdTest(WorkRepoCase):
+    def setUp(self):
+        super().setUp()
+        self.facts_path = os.path.join(self.repo, "facts.json")
+        self.write_facts(pr_facts())
+        self.rules_path = os.path.join(self.repo, "rules.json")
+        self.write_rules(FULL_RULES)
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+        self.run_main(["work", "set", "--issue", "ENG-1", "owner=frontend",
+                       "branch=b", "pr=12", "qa.verdict=approve",
+                       "qa.sha=abc123def456"])
+
+    def write_facts(self, facts):
+        with open(self.facts_path, "w") as fh:
+            json.dump(facts, fh)
+
+    def write_rules(self, rules):
+        with open(self.rules_path, "w") as fh:
+            json.dump(rules, fh)
+
+    def done(self, *extra, answers=None, error=None):
+        def fake_ask(state, questions, provider, timeout):
+            if error:
+                raise error
+            self.states.append(state)
+            return "jev", {k: {"noul": answers[k]} for k in questions}
+        self.states = []
+        with mock.patch.object(dispatch, "ask", side_effect=fake_ask):
+            return self.run_main(["done", "--issue", "ENG-1", "--facts",
+                                  self.facts_path, "--rules", self.rules_path,
+                                  "--format", "json", *extra])
+
+    def log(self):
+        with open(self.log_path()) as fh:
+            return [json.loads(line) for line in fh]
+
+    def test_facts_only_done_and_recorded(self):
+        code, out, _ = self.done()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["verdict"], "done")
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            item = json.load(fh)
+        self.assertEqual(item["done"]["verdict"], "done")
+        self.assertEqual(item["done"]["sha"], "abc123def456")
+        self.assertEqual(self.log()[-1]["kind"], "done")
+        for phase in ("building", "review", "open", "done", "merged"):
+            self.assertEqual(self.run_main(["work", "advance", "--issue", "ENG-1",
+                                            "--to", phase])[0], 0)
+        closeout = self.log()[-1]
+        self.assertEqual(closeout["kind"], "closeout")
+        self.assertEqual(closeout["pr"], 12)
+        self.assertEqual(closeout["threads"]["by_author"], {"greptile-apps": 1})
+
+    def test_done_must_match_qa_sha(self):
+        self.write_rules({"version": 1, "checks": {"ci": {}}})
+        self.write_facts(pr_facts(headSha="newer000"))
+        self.assertEqual(self.done()[0], 0)
+        for phase in ("building", "review", "open"):
+            self.run_main(["work", "advance", "--issue", "ENG-1", "--to", phase])
+        code, out, _ = self.run_main(["work", "advance", "--issue", "ENG-1",
+                                      "--to", "done"])
+        self.assertEqual(code, 4)
+        self.assertIn("qa approved abc123def456", out)
+
+    def test_failing_fact_skips_judgments(self):
+        self.write_facts(pr_facts(isDraft=True))
+        self.write_rules(dict(FULL_RULES, judgments=[{"id": "a", "statement": "s"}]))
+        code, out, _ = self.done(answers={"a": 0.0})
+        self.assertEqual(code, 4)
+        self.assertEqual(json.loads(out)["verdict"], "not_done")
+        self.assertEqual(self.states, [])
+
+    def test_pending_exit_seven(self):
+        self.write_facts(pr_facts(checks=[{"name": "build", "status": "pending"}]))
+        code, out, _ = self.done()
+        self.assertEqual(code, 7)
+        self.assertEqual(json.loads(out)["verdict"], "pending")
+
+    def test_judgments_block_and_pass(self):
+        self.write_rules(dict(FULL_RULES, judgments=[
+            {"id": "criteria", "statement": "s", "threshold": 0.5},
+            {"id": "tests", "statement": "t", "threshold": 0.6, "evidence": ["diff"]}]))
+        code, out, _ = self.done(answers={"criteria": 0.2, "tests": 0.7})
+        self.assertEqual(code, 4)
+        decision = json.loads(out)
+        self.assertEqual(decision["verdict"], "blocked")
+        self.assertTrue(decision["judgments"]["tests"]["blocked"])
+        self.assertEqual(len(self.states), 2)  # one state per evidence set
+        diff_only = [s for s in self.states if "--- plan ---" not in s
+                     and "--- pull request ---" not in s]
+        self.assertEqual(len(diff_only), 1)
+        self.assertIn("--- diff ---", diff_only[0])
+        code, out, _ = self.done(answers={"criteria": 0.2, "tests": 0.1})
+        self.assertEqual(code, 0)
+
+    def test_unavailable_escalates_or_facts_only(self):
+        rules = dict(FULL_RULES, judgments=[{"id": "a", "statement": "s"}])
+        self.write_rules(rules)
+        code, out, _ = self.done(error=RuntimeError("down"))
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(out)["verdict"], "escalate")
+        self.write_rules(dict(rules, judgment={"onUnavailable": "facts_only"}))
+        code, out, _ = self.done(error=RuntimeError("down"))
+        self.assertEqual(code, 0)
+        self.assertIn("skipped", json.loads(out)["judgments"])
+
+    def test_invalid_rules_exit_six(self):
+        with open(self.rules_path, "w") as fh:
+            fh.write("{not json " + SENTINEL)
+        code, _, err = self.done()
+        self.assertEqual(code, 6)
+        self.assertNotIn(SENTINEL, err)
+        self.write_rules({"version": 1, "checks": {"lint": {}}})
+        code, _, err = self.done()
+        self.assertEqual(code, 6)
+        self.assertIn("unknown check", err)
+
+    def test_defaults_without_rules_file(self):
+        code, out, _ = self.run_main(["done", "--issue", "ENG-1", "--facts",
+                                      self.facts_path, "--format", "json"])
+        self.assertEqual(code, 0)
+        decision = json.loads(out)
+        self.assertEqual(decision["rules"], "defaults")
+        self.assertEqual(set(decision["facts"]), {"ci", "reviewThreads", "qa", "draft"})
+
+    def test_check_reports_rules(self):
+        with open(os.path.join(self.meta, "done.json"), "w") as fh:
+            json.dump(FULL_RULES, fh)
+        code, out, _ = self.run_main(["check"], env=JEV_ENV, probe=OK_PROBE)
+        self.assertEqual(code, 0)
+        self.assertIn("(7 checks, 0 judgments)", out)
+        with open(os.path.join(self.meta, "done.json"), "w") as fh:
+            fh.write("[]")
+        code, _, err = self.run_main(["check"], env=JEV_ENV, probe=OK_PROBE)
+        self.assertEqual(code, 6)
+        self.assertIn("invalid done.json", err)

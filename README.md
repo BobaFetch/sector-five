@@ -87,21 +87,57 @@ python3 plugin/tools/dispatch.py gate --state "<diff summary>" \
   --statement "This change is dangerous"
 ```
 
-Exit 0 means ready/off, routed, proceed, or unrouted recorded; 3 escalates
-(low confidence); 4 blocks (gate holds); 2 is a usage or provider/probe error;
-5 means no credentials and 6 invalid config (`check` only).
+Exit 0 means ready/off, routed, proceed, unrouted recorded, or done; 3
+escalates (low confidence); 4 blocks (gate holds, not done, or a refused
+phase change); 7 means pending (CI still running); 2 is a usage or
+provider/probe error; 5 means no credentials and 6 an invalid `config.json`
+or `done.json`.
 Full reference: [`plugin/docs/runbook.md`](plugin/docs/runbook.md).
+
+## Work items and the done check
+
+Each issue in flight gets a state file, `.sectorfive/work/<issue>.json`. Its
+phases go planned → building → review → open → done → merged, and
+`dispatch.py work advance` refuses a phase until its requirements hold: an
+owner, a routed step, a branch, a PR, qa's approve on the head SHA, and a
+passing done check.
+
+`dispatch.py done --issue <key>` decides whether a PR is ready for you to
+merge, in two layers:
+
+- **Fact checks** are read from GitHub with `gh`: CI, review threads, a review
+  bot's score, a plan file, PR body sections, qa's approve, draft state.
+- **Judgments** are statements the dispatcher scores against the plan, PR and
+  diff. They can block a PR but never pass a failed fact.
+
+Each repo's owner configures both layers in `.sectorfive/done.json`. Without
+it, the defaults are CI green, threads resolved, qa approve on head, and not a
+draft. Every option is in the
+[runbook's `done.json` reference](plugin/docs/runbook.md#donejson-reference).
 
 ## Update / rollback
 
-Pull and re-run your install command, or `muse plugins marketplace update
-sector-five`. Rollback: check out the previous tag. Tags are `vX.Y.Z`.
+Claude reads the plugin straight from a local checkout, so pull and restart.
+For a marketplace install, run `claude plugin marketplace update sector-five`.
+
+Muse caches a snapshot, and `muse plugins update` can keep serving the old
+one. Refresh the marketplace, then reinstall:
+
+```sh
+muse plugins marketplace update sector-five
+muse plugins remove sector-five
+muse plugins install sector-five@sector-five
+```
+
+Rollback: check out the previous tag. Tags are `vX.Y.Z`.
 
 ## Target-repo bootstrap
 
 In a working repo, the team scaffolds `.sectorfive/` on first contact
 (repo map, ownership map, contracts index, baseline, tech debt, decisions,
-plans, requests, dispatch log) per the contract's drop-in bootstrap.
+plans, requests, work items, dispatch log) per the contract's drop-in
+bootstrap. The repo owner can add `.sectorfive/done.json` with the repo's done
+rules at any time.
 
 The first session runs an init interview covering dispatcher use, fallback
 behavior (`pinned` by default), and harness mode (`multi` or `single`).
@@ -138,6 +174,4 @@ rm -rf "$S"
 
 Sanity check: re-hashing the previous tag the same way must reproduce its
 published digest. Files outside `plugin/` (README, ROADMAP) don't affect the
-digest. After pushing, refresh installs with
-`claude plugin marketplace update sector-five` and
-`muse plugins update sector-five`.
+digest. After pushing, refresh installs as described in Update / rollback.

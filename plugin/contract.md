@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v4.2. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v5. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -15,7 +15,7 @@ description: Five-role agent team. planning leads and dispatches; backend owns c
 2. **Ownership is explicit and checkable.** Every path belongs to exactly one agent (see `.sectorfive/ownership.md`). Same-file overlap is resolved by phase order, never by parallel edits.
 3. **No unplanned changes.** Work outside the plan — including "obvious" cleanups — goes back to planning or into tech debt. Never ships silently.
 4. **Evidence over assumption.** Agents never guess; they stop, cite facts, list options, and ask planning.
-5. **Verification is the gate.** Nothing is done until the plan's verification steps pass and qa signs off.
+5. **Verification is the gate.** Nothing is done until the plan's verification steps pass, qa signs off, and the repo's done check passes.
 6. **Model-agnostic contracts, pinned defaults.** Role specs run on any frontier model; each role pins a tested default (see Model policy).
 
 ## Locating this contract
@@ -157,7 +157,9 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 | `plans/` | planning | Durable plans, one file per plan |
 | `requests/` | planning | Cross-domain requests and their resolutions |
 | `config.json` | planning | Init interview answers: dispatcher status/provider/fallbackMode, harness mode + role assignments |
-| `dispatch-log.jsonl` | planning | Decision-model routing/gate outcomes (append-only) |
+| `dispatch-log.jsonl` | planning | Decision-model routing, gate, done and closeout outcomes (append-only) |
+| `work/<issue>.json` | planning (qa records its verdict) | One state file per work item: phase, owner, branch, PR, qa verdict with SHA, last done result, history |
+| `done.json` | repo owner | Done rules for this repo (optional; the contract defaults apply without it) |
 | `evidence/` | qa | Screenshots and recordings per plan (`evidence/<plan id>/`); planning publishes them to the `sectorfive-evidence` branch for the PR |
 
 ## Operating protocols
@@ -167,7 +169,7 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 1. Read your role section in this file plus `ownership.md`, the active plan in `plans/`, and `baseline.md`.
 2. Confirm your task's scope, non-goals, and verification steps from the plan — not from chat memory.
 3. Confirm no other agent is working your files (planning sequences; when in doubt, ask).
-4. **planning only:** read `config.json`, run `dispatch.py check`, and open with a one-line mode banner, e.g. `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi (grok missing → muse)`. When status is `pending`, ask again for credentials. A mode that differs from `config.json` is always stated, never applied silently.
+4. **planning only:** read `config.json`, run `dispatch.py check` (it also validates `done.json`), run `dispatch.py work show` to see every open work item and its phase, and open with a one-line mode banner, e.g. `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi (grok missing → muse)`. When status is `pending`, ask again for credentials. A mode that differs from `config.json` is always stated, never applied silently.
 
 ### Phase order
 
@@ -220,7 +222,8 @@ Owner: planning / Date: <date> / Status: <draft|active|done>
 - [ ] Build, tests, lint, and typecheck pass (same commands as `baseline.md`, no new warnings).
 - [ ] No contract break unless the plan explicitly approved it, with migration covered.
 - [ ] No new dependencies, secrets, or infra changes unless the plan approved them.
-- [ ] Completion report filed; qa verdict is **approve**.
+- [ ] Completion report filed; qa verdict is **approve** on the current head SHA.
+- [ ] `dispatch.py done` returns `done` under the repo's rules (see Work items and the done check).
 
 ### Dangerous actions (always ask first)
 
@@ -258,9 +261,36 @@ planning owns delivery; qa's `approve` gates it; the user merges.
    - Embed them in the PR description with links pinned to that commit, `https://github.com/<owner>/<repo>/blob/<sha>/<plan id>/<file>?raw=true`. Screenshots and GIFs render inline; link videos.
    - Keep files small (compressed PNG, short GIFs). In a private repo, the images show only for people with repo access.
    - Pruning the evidence branch means rewriting its history, which is a dangerous action (ask first).
-4. **Watch checks.** planning watches CI until it is green on the current head SHA. A failure goes back to the owning role through planning.
-5. **Review feedback.** For each bot finding, planning sends a fix to the owning role, gets qa's `approve` again, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
-6. **Merge and close out.** The user merges unless the repo records otherwise; the team never merges. At handoff or merge, planning appends a `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, bot findings, human findings, check status). Review findings per PR are the team's quality metric.
+4. **Watch to a terminal state.** Whoever opens the PR owns it until `dispatch.py done` returns `done` or `not_done`. `pending` (exit 7) means checks are still running or a review bot hasn't scored yet: re-run later. A long wait ends the turn with a named watch (what is pending and where the result will land) and a report when it resolves. If the watch can't be finished, hand it to the user explicitly; never drop it silently. A CI failure goes back to the owning role through planning.
+5. **Verdicts land on completed CI only.** qa never approves on a partial or still-running suite, and implementers never claim green from a partial run. A failure is treated as pre-existing only with evidence (identical on the base, or passing in isolation), recorded with `work set ci.preexisting=<check names>`.
+6. **Review feedback.** For each bot finding, planning sends a fix to the owning role, gets qa's `approve` again on the new head, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
+7. **Read back every external write.** An issue update, PR body, comment or thread reply is reported as done only after reading the field back and confirming its content, never from a command's exit status alone.
+8. **Merge and close out.** When the done check passes, planning advances the work item to `done` and hands the PR to the user. The user merges unless the repo records otherwise; the team never merges. After the merge, `work advance --to merged` appends the `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, check status, review threads by author). Review findings per PR are the team's quality metric.
+
+### Work items and the done check
+
+Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, managed with `dispatch.py work`. Agents read it to see where the item stands instead of asking. Parallel lanes stay legible because every item records its phase, owner, branch and PR in one place.
+
+| Phase | Entered when (enforced by `work advance`) |
+| --- | --- |
+| `planned` | `work new --issue <key> --plan <path>` |
+| `building` | owner recorded; when the dispatcher is `on`, the step was routed or recorded unrouted with `--issue <key>` |
+| `review` | branch recorded |
+| `open` | PR recorded; qa `approve` recorded with the head SHA it reviewed |
+| `done` | the last `dispatch.py done` returned `done`, on the same SHA qa approved |
+| `merged` | after the user merges; appends the closeout line |
+| `blocked` | any time, with `--note` giving the reason |
+
+Phases advance one at a time. Moving back (for example `review` → `building` after a veto) is always allowed. Only planning advances phases; qa records its own verdict (`work set qa.verdict=approve qa.sha=<sha> qa.report=<path>`).
+
+**The done check** (`dispatch.py done --issue <key>`) decides whether a PR is ready to hand to the user. It has two layers:
+
+- **Fact checks**, read from GitHub with `gh` and from the work item: CI, review threads, a review bot's score, a plan file on the branch, PR body sections, qa's approve on the head SHA, draft state. A failed fact means `not_done` (exit 4); a running check or a missing bot score means `pending` (exit 7). The dispatcher is never asked to overrule a fact.
+- **Judgments**, which run only after every fact passes: statements the dispatcher scores (`noul`) against the evidence each one names (plan, PR, qa report, review comments, diff). A score at or above the statement's threshold means `blocked` (exit 4). If the dispatcher is unavailable, the verdict is `escalate` (exit 3) unless the repo chose `facts_only`.
+
+Each repo's owner sets the rules in `.sectorfive/done.json`: which fact checks run and with what options, and which judgments to ask with what thresholds. The file is validated strictly, so a typo fails `check` instead of silently weakening the gate. Without the file, the defaults are CI passed, review threads resolved, qa approve on head, and not a draft. `docs/runbook.md` documents every option.
+
+Every `done` run is logged and stored on the work item. Comparing done verdicts with later review findings and follow-up fixes is how the judgment thresholds get calibrated.
 
 ### Communication rules
 
@@ -282,6 +312,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Policy:**
 
 - High-confidence `choice` → dispatch to the chosen agent with the durable plan. Low-confidence (below `--min-confidence`, default 0.60) → escalate to the user instead of misrouting (`dispatch.py route` exits 3).
+- planning passes the work item key as `--issue <key>` on every `route` and `unrouted` call, so `work advance` can confirm the step was dispatched.
 - planning passes the role it planned from `ownership.md` as `--expect <role>`. The log keeps `expected_role` for recalibration.
   - **`override`** (exit 0): the dispatcher disagrees at or above `--trust` (default 0.90). Follow the dispatcher, then amend `ownership.md` for the paths involved and record it in `decisions.md`. A confident disagreement usually means the map is wrong. Two role rules still win over any pick: test files belong to qa, and qa never edits product code. If the pick breaks one of them, assign the role the rule requires and note it as a dispatcher miss.
   - **`mismatch`** (exit 3): disagreement below `--trust`. planning resolves it from the role definitions in this contract (not just the map) or asks the user. It never dispatches on the pick alone.
@@ -316,9 +347,13 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - [ ] No dangerous action taken without recorded approval.
 - [ ] Completion report present and accurate.
 
+- [ ] Verdict given on a completed CI run for the current head SHA, and recorded on the work item with that SHA.
+
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5: work items, one state file per issue (`.sectorfive/work/<issue>.json`) with phases advanced by `dispatch.py work` only when their requirements hold. A done check (`dispatch.py done`): owner-configured rules in `.sectorfive/done.json`, with fact checks read from GitHub and judgments scored by the dispatcher, which can block but never pass a failed fact. Delivery adds watching a PR to a terminal state, verdicts only on completed CI, evidence for pre-existing failures, and reading back every external write. `route` and `unrouted` take `--issue`, and the closeout line is written on `work advance --to merged`. (From yonaka's execute-to-PR standard and parallel-work request, 2026-10-15.)
 
 - v4.2: a Delivery section: planning pushes after qa's approval, opens the PR, publishes evidence through the `sectorfive-evidence` branch, watches checks, routes review feedback, and records a closeout; the user merges. Also: a confident dispatcher disagreement (`override`, at or above `--trust` 0.90) wins over the ownership map, which planning then amends. Two role rules still win over the dispatcher: tests belong to qa, and qa never edits product code. Headless muse is `muse exec`. Read-only steps are exempt from the writable-harness rule. Browser work runs in a browser-capable harness. qa captures browser evidence (screenshots and recordings) for planning to publish. Repos can set verification limits, and under them qa may run one named test file. No `git stash` across parallel worktrees. planning may run the formatter on a lane's changed files. (yonaka D14–D21, 2026-10-14.)
 - v4.1: writing roles run on a writable harness (`codex exec --sandbox workspace-write`), and an empty diff counts as a failed step. The qa checklist adds a stale-assertion sweep, accessible-attribute copy scans, and an adversarial pre-PR review. Dispatcher role criteria assign product-code fixes to the role that owns the files and test-writing to qa. (Lessons from the yonaka rollout, 2026-10-13.)

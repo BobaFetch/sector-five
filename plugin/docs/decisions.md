@@ -69,3 +69,47 @@ can't close it, so `route --expect <planned role>` now makes any disagreement
 escalate (`mismatch`, exit 3), and the log records `expected_role`. That turns
 future runs into labeled calibration data. Revisit once yonaka has about 50
 `expected_role` rows.
+
+## 2026-10-15 — work items and the done check (v0.4.0, contract v5)
+
+yonaka ran up to 9 implementers in parallel. The parallelism held, but the
+handoffs between phases didn't:
+
+- 9 PRs shipped with no plan file until one was added later.
+- qa approved before CI finished.
+- Branches touching the same files were caught late.
+- Nobody watched the PRs after opening them.
+- The dispatch log stopped growing even though about 19 PRs were opened.
+
+The repo asked for queues (one per phase).
+
+Chosen for now: one state file per issue, with phases advanced only by
+`dispatch.py work advance` when each phase's requirements hold. This needs no
+runtime support (agents can't wait on events, so a real queue would mean
+polling). The file keeps fixed fields so it can later become a queue entry.
+Real queues, and possibly a kanban/issue board, wait for a UI wrapper once the
+roles have settled.
+
+"Done" is a separate check, `dispatch.py done`, with two layers:
+
+- Fact checks are read from GitHub and decided by code.
+- Judgments are scored by the dispatcher. They run only after every fact
+  passes, and they can block but never pass.
+
+This keeps a confident model from calling a PR done while its CI is red. Each
+repo's owner configures both layers in `.sectorfive/done.json`, which is
+validated strictly.
+
+Live smoke test on two open yonaka PRs (read-only, `--no-log`):
+
+- The fact checks matched what was on GitHub (a draft, a missing Greptile
+  score, no recorded qa approve).
+- A first judgment run blocked on "untested behavior". The 65k-char diff had
+  been cut at 16k, before the test files, so Jev never saw them.
+- The state now lists every changed file and gives each file a fair share of
+  the diff. With that, the same PR scored 0.43 and 0.41 (both pass).
+- These scores are close to their thresholds, so the defaults are starting
+  points. Calibrate them from logged `done` lines against later review
+  findings.
+- One of the PRs reported a single CI check where its neighbor reported 22.
+  That led to the `ci.required` option.
