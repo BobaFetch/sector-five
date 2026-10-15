@@ -49,9 +49,9 @@ Cloudflare credentials); Jev→Clef chain is covered by mocked unit tests.
 Follow-up: tier always returned `standard` in the spike; recalibrate tier
 criteria once real dispatch outcomes accumulate.
 
-## 2026-10-13 — routing recalibration from kiaora (first live repo)
+## 2026-10-13 — routing recalibration from the first live repo
 
-Replayed the 23 kiaora `route` calls through Jev (`--no-log`), each labeled with
+Replayed the first live repo's 23 `route` calls through Jev (`--no-log`), each labeled with
 the role that owned the step. Role question only, so confidences differ a little
 from the logged runs.
 
@@ -64,8 +64,8 @@ from the logged runs.
 | refined criteria + step framing (shipped) | 19/23 | 19/23 |
 
 The gain is within noise on 23 cases. One confident misroute remained in every
-variant ("sign-out redirect regression tests" → backend at 0.6–0.9). Wording
+variant (a regression-test step → backend at 0.6–0.9). Wording
 can't close it, so `route --expect <planned role>` now makes any disagreement
 escalate (`mismatch`, exit 3), and the log records `expected_role`. That turns
-future runs into labeled calibration data. Revisit once kiaora has about 50
+future runs into labeled calibration data. Revisit once a live repo has about 50
 `expected_role` rows.

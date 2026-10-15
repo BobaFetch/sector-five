@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "sector-five",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa).",
       "author": {
         "name": "BobaFetch"
