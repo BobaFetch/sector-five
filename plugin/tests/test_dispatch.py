@@ -72,13 +72,28 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("verdict: ROUTED", out)
 
-    def test_expect_mismatch_escalates_even_when_confident(self):
-        code, out = self.run_route(route_answers(confidence=0.95),
+    def test_expect_mismatch_below_trust_escalates(self):
+        code, out = self.run_route(route_answers(confidence=0.8),
                                    ["--expect", "qa", "--format", "json"])
         self.assertEqual(code, 3)
         decision = json.loads(out)
         self.assertEqual(decision["verdict"], "mismatch")
         self.assertEqual(decision["expected_role"], "qa")
+
+    def test_expect_mismatch_at_trust_overrides(self):
+        code, out = self.run_route(route_answers(confidence=0.9),
+                                   ["--expect", "qa", "--format", "json"])
+        self.assertEqual(code, 0)
+        decision = json.loads(out)
+        self.assertEqual(decision["verdict"], "override")
+        self.assertEqual(decision["role"], "backend")
+        self.assertEqual(decision["expected_role"], "qa")
+
+    def test_low_confidence_mismatch_still_escalates_with_low_trust(self):
+        code, out = self.run_route(route_answers(confidence=0.4),
+                                   ["--expect", "qa", "--trust", "0.3"])
+        self.assertEqual(code, 3)
+        self.assertIn("verdict: MISMATCH", out)
 
     def test_plan_frames_step_ahead_of_context(self):
         import tempfile

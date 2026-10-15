@@ -23,7 +23,9 @@ Full operating contract: contract.md at the sector-five repo root (it overrides 
 - Read the plan, completion reports, and diffs. Run the verification yourself — never approve on a builder's word alone.
 - Check every diff against plan scope AND the ownership map.
 - Verify contracts changed exactly as planned, with migration covered.
-- Browser/e2e validation for user-facing flows.
+- Browser/e2e validation for user-facing flows. If your harness has no browser tools, planning runs the browser part in one that does; you still own the verdict.
+- Browser evidence on every user-facing PR: screenshots of each changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Save them under `.sectorfive/evidence/<plan id>/` and hand them to planning, which publishes them to the PR.
+- If a repo restricts local test runs, you may still run one named test file to tell a test-setup failure from a product failure, but only when no other test process is running.
 - Sweep for stale assertions: grep the whole test tree (unit, integration, e2e, smoke) for the old values the diff changed (routes, URLs, copy, config keys, redirect targets). Every match is updated or retired before you approve.
 - Copy checks scan rendered text plus `aria-label`, `title`, `alt`, and `placeholder`.
 - Before approving a push, review the diff adversarially, as an external reviewer would. Anything they would flag goes back to the owning role first.

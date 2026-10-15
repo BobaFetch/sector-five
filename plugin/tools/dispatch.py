@@ -5,9 +5,9 @@ Stdlib-only. Reads keys from the environment or a gitignored `.env` at the
 sector-five repo root (never committed, never printed).
 
 Exit codes:
-  0  routed (route) / proceed (gate) / ready or off (check) / recorded (unrouted)
+  0  routed or override (route) / proceed (gate) / ready or off (check) / recorded (unrouted)
   2  usage or provider error (message on stderr)
-  3  escalate to the user (route confidence below threshold, or --expect mismatch)
+  3  escalate to the user (route confidence below threshold, or --expect mismatch below --trust)
   4  blocked (gate statement holds at or above threshold)
   5  no credentials (check)
   6  invalid config.json (check)
@@ -292,8 +292,13 @@ def cmd_route(args):
     role = answers["role"]
     tier = answers["tier"]
     difficulty = answers["difficulty"]
-    confident = float(role.get("confidence", 0.0)) >= args.min_confidence
-    mismatch = args.expect is not None and role.get("choice") != args.expect
+    confidence = float(role.get("confidence", 0.0))
+    confident = confidence >= args.min_confidence
+    disagrees = args.expect is not None and role.get("choice") != args.expect
+    # A confident disagreement usually means the ownership map is wrong
+    # (kiaora D18), so the pick wins and planning amends the map.
+    override = disagrees and confident and confidence >= args.trust
+    mismatch = disagrees and not override
     decision = {
         "kind": "route",
         "provider": provider,
@@ -305,7 +310,7 @@ def cmd_route(args):
         "difficulty": difficulty.get("score"),
         "difficulty_confidence": difficulty.get("confidence"),
         "min_confidence": args.min_confidence,
-        "verdict": "mismatch" if mismatch else (
+        "verdict": "override" if override else "mismatch" if mismatch else (
             "routed" if confident else "escalate"),
     }
     if args.expect is not None:
@@ -323,7 +328,7 @@ def cmd_route(args):
             decision["tier"], tier.get("confidence") or 0.0))
         print("difficulty: %s (confidence %.2f)" % (
             decision["difficulty"], difficulty.get("confidence") or 0.0))
-        if mismatch:
+        if disagrees:
             print("expected: %s" % args.expect)
         print("verdict: %s" % decision["verdict"].upper())
     return 0 if confident and not mismatch else 3
@@ -372,7 +377,10 @@ def build_parser():
     route.add_argument("--plan", help="optional plan file appended to the state")
     route.add_argument("--min-confidence", type=float, default=0.60)
     route.add_argument("--expect", choices=sorted(ROLES),
-                       help="planned role from ownership; a different pick escalates")
+                       help="planned role from ownership; a different pick escalates "
+                            "unless its confidence reaches --trust")
+    route.add_argument("--trust", type=float, default=0.90,
+                       help="confidence at which a pick overrides --expect (default: 0.90)")
     route.set_defaults(func=cmd_route)
     gate = sub.add_parser("gate", parents=[common],
                           help="yes/no gate over a state")

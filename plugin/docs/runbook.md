@@ -82,8 +82,11 @@ python3 tools/dispatch.py route --task "Regression tests for sign-out returnTo" 
   --plan .sectorfive/plans/004.md --expect qa
 ```
 
-If the pick differs, the verdict is `MISMATCH` and the command exits 3, even at
-high confidence. Resolve it from the ownership map or ask the user. With
+If the pick differs at or above `--trust` (default 0.90), the verdict is
+`OVERRIDE` (exit 0): follow the pick and amend `ownership.md`. Two role rules
+still win over the pick: tests belong to qa, and qa never edits product code.
+Below `--trust`, the verdict is `MISMATCH` (exit 3): resolve it from the
+contract's role definitions or ask the user. With
 `--plan`, the step text comes first and is labeled, so the plan's main domain
 doesn't outweigh the step being routed.
 `--format json` prints the full decision object for scripting.
@@ -115,9 +118,9 @@ don't use it for required fallback records. See the contract's dispatcher policy
 
 | Code | Meaning |
 | --- | --- |
-| 0 | routed (route) / proceed (gate) / ready or off (check) / recorded (unrouted) |
+| 0 | routed or override (route) / proceed (gate) / ready or off (check) / recorded (unrouted) |
 | 2 | usage or provider/probe error (stderr explains) |
-| 3 | escalate — confidence too low, or `--expect` mismatch |
+| 3 | escalate — confidence too low, or `--expect` mismatch below `--trust` |
 | 4 | blocked — gate statement holds |
 | 5 | no credentials (check) |
 | 6 | invalid config.json (check) |

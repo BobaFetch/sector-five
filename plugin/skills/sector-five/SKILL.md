@@ -115,9 +115,25 @@ Role contracts are model-agnostic (any frontier model may execute them); each
 role pins a tested default per the contract's Model policy.
 
 Writing roles need a writable harness: `codex exec --sandbox workspace-write`,
-`claude -p --permission-mode acceptEdits`. A read-only sandbox quietly turns an
-implementation step into analysis. If a step comes back with no diff in its
-assigned paths, it failed: re-dispatch it.
+`claude -p --permission-mode acceptEdits`, `grok -p --permission-mode acceptEdits`,
+or `muse exec` (`muse -p` is not a valid flag). A read-only sandbox quietly turns
+an implementation step into analysis. If a step comes back with no diff in its
+assigned paths, it failed: re-dispatch it. Read-only steps such as audits and
+reviews are exempt; for them, an empty report is the failure signal.
+
+Browser work runs in a harness with browser tools (for example Claude in Chrome)
+when the role's pin has none, and is recorded as a substitution. For user-facing
+changes, qa captures screenshots (desktop and phone) and short recordings of
+changed flows under `.sectorfive/evidence/<plan id>/` and hands them to planning.
+
+## Delivery
+
+planning owns delivery. It pushes only after qa approves, opens the PR, and
+publishes qa's evidence by pushing it to the orphan `sectorfive-evidence` branch,
+embedding commit-pinned `?raw=true` links in the PR description. (GitHub has no
+attachment upload API.) It also watches checks, routes bot findings to the
+owning role, and logs a `closeout`. The user merges. See the contract's
+Delivery section.
 
 ## Dispatcher (decision models)
 
@@ -129,8 +145,11 @@ so config and logs use that repo's `.sectorfive/`:
 - Route a task: `python3 tools/dispatch.py route --task "..."`.
   Exit 0 prints the chosen role + tier; exit 3 means confidence is below
   threshold — escalate to the user instead of misrouting. Pass the planned
-  role as `--expect <role>`: a different pick is a `mismatch` (exit 3) even
-  at high confidence, so resolve it from `ownership.md` or ask the user.
+  role as `--expect <role>`. A different pick at or above `--trust` (0.90) is
+  an `override`: follow it and amend `ownership.md`, unless the pick breaks
+  one of two role rules (tests belong to qa; qa never edits product code).
+  Below that it is a `mismatch` (exit 3): resolve it from the contract's role
+  definitions or ask the user.
 - Yes/no gate: `python3 tools/dispatch.py gate --state "..." --statement "..."`.
   Exit 0 proceeds; exit 4 blocks until planning rules.
 - Keys come from `TYPESAFE_API_KEY` (Jev) and `CLOUDFLARE_ACCOUNT_ID` /
