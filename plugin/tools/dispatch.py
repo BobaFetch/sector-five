@@ -295,8 +295,8 @@ def cmd_route(args):
     confidence = float(role.get("confidence", 0.0))
     confident = confidence >= args.min_confidence
     disagrees = args.expect is not None and role.get("choice") != args.expect
-    # A confident disagreement usually means the ownership map is wrong,
-    # so the pick wins and planning amends the map.
+    # A confident disagreement usually means the ownership map is wrong
+    # (yonaka D18), so the pick wins and planning amends the map.
     override = disagrees and confident and confidence >= args.trust
     mismatch = disagrees and not override
     decision = {

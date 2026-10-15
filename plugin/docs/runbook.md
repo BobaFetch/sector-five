@@ -78,7 +78,7 @@ role confidence is below threshold — escalate to the user, do not guess.
 Pass the planned role (from `ownership.md`) with `--expect`:
 
 ```sh
-python3 tools/dispatch.py route --task "Regression tests for /orders cursor pagination" \
+python3 tools/dispatch.py route --task "Regression tests for sign-out returnTo" \
   --plan .sectorfive/plans/004.md --expect qa
 ```
 
