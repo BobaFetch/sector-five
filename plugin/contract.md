@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v4.1. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v4.2. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -30,7 +30,7 @@ Agents resolve this file in order: `$SECTORFIVE_HOME/contract.md` when set, else
 name: planning
 description: Team lead / program manager. Converts specs and ideas into realistic, sequenced task plans. Assigns backend, frontend, polish, and qa; blocks scope creep; owns the ownership map, tech-debt log, and decision log. Use when the user provides a spec, wants a breakdown, sequencing, a status check, or plan discussion. Does not implement product code unless explicitly asked.
 owns: Plans, assignments, sequencing, scope decisions, `.sectorfive/` meta files (ownership, repo map, contracts index, baseline, tech debt, decisions).
-never: Edits product code or tests. Never assigns two agents to the same files in parallel.
+never: Edits product code or tests, except running the repo's formatter in write mode on a lane's own changed files during verification (mechanical and meaning-preserving; lint findings and behavior fixes still go to the owning role; never a repo-wide format). Never assigns two agents to the same files in parallel.
 triggers: Specs, breakdowns, sequencing, status checks, cross-domain requests, scope questions, plan changes.
 permissionMode: plan
 outputFormat: default (plans use the Durable plan template below)
@@ -158,6 +158,7 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 | `requests/` | planning | Cross-domain requests and their resolutions |
 | `config.json` | planning | Init interview answers: dispatcher status/provider/fallbackMode, harness mode + role assignments |
 | `dispatch-log.jsonl` | planning | Decision-model routing/gate outcomes (append-only) |
+| `evidence/` | qa | Screenshots and recordings per plan (`evidence/<plan id>/`); planning publishes them to the `sectorfive-evidence` branch for the PR |
 
 ## Operating protocols
 
@@ -246,6 +247,21 @@ Deviations: <or "none" — any deviation must already be planning-approved>
 Follow-ups / tech debt: <or "none">
 ```
 
+### Delivery (push, PR, review feedback)
+
+planning owns delivery; qa's `approve` gates it; the user merges.
+
+1. **Push gate.** Push only after qa's adversarial pre-PR review returns `approve` on the current diff. Never push red or unreviewed changes.
+2. **Open the PR.** planning pushes the branch and opens the PR following the repo's PR conventions, linking the issue and the plan.
+3. **Attach evidence.** qa hands planning the captures in `.sectorfive/evidence/<plan id>/`. GitHub has no attachment upload API, so planning hosts them with git:
+   - Commit them to the orphan branch `sectorfive-evidence` under `<plan id>/` and push it. Never commit them to the feature branch.
+   - Embed them in the PR description with links pinned to that commit, `https://github.com/<owner>/<repo>/blob/<sha>/<plan id>/<file>?raw=true`. Screenshots and GIFs render inline; link videos.
+   - Keep files small (compressed PNG, short GIFs). In a private repo, the images show only for people with repo access.
+   - Pruning the evidence branch means rewriting its history, which is a dangerous action (ask first).
+4. **Watch checks.** planning watches CI until it is green on the current head SHA. A failure goes back to the owning role through planning.
+5. **Review feedback.** For each bot finding, planning sends a fix to the owning role, gets qa's `approve` again, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
+6. **Merge and close out.** The user merges unless the repo records otherwise; the team never merges. At handoff or merge, planning appends a `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, bot findings, human findings, check status). Review findings per PR are the team's quality metric.
+
 ### Communication rules
 
 - Agents coordinate through planning, not directly — no agent-to-agent assignments.
@@ -266,7 +282,9 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Policy:**
 
 - High-confidence `choice` → dispatch to the chosen agent with the durable plan. Low-confidence (below `--min-confidence`, default 0.60) → escalate to the user instead of misrouting (`dispatch.py route` exits 3).
-- planning passes the role it planned from `ownership.md` as `--expect <role>`. If the dispatcher picks a different role, the verdict is `mismatch` (exit 3), even at high confidence. planning then resolves it from the ownership map or asks the user. It never dispatches on the pick alone. The log keeps `expected_role` for recalibration.
+- planning passes the role it planned from `ownership.md` as `--expect <role>`. The log keeps `expected_role` for recalibration.
+  - **`override`** (exit 0): the dispatcher disagrees at or above `--trust` (default 0.90). Follow the dispatcher, then amend `ownership.md` for the paths involved and record it in `decisions.md`. A confident disagreement usually means the map is wrong. Two role rules still win over any pick: test files belong to qa, and qa never edits product code. If the pick breaks one of them, assign the role the rule requires and note it as a dispatcher miss.
+  - **`mismatch`** (exit 3): disagreement below `--trust`. planning resolves it from the role definitions in this contract (not just the map) or asks the user. It never dispatches on the pick alone.
 - Dispatcher unavailable (no credentials, provider error, `dispatch.py` exits 2) → apply `fallbackMode` and say so: `pinned` assigns the planned role on its pinned default and marks the step **unrouted** in the plan and the log; `ask` stops for the user; `block` holds the step. Never a silent fallback.
 - `noul` gates run before dangerous actions and at qa's review; a "yes" on danger/scope-breach blocks until planning rules (`dispatch.py gate` exits 4).
 - Up to 64 questions per request; keep dispatcher state factual (task text + plan + diff summary).
@@ -279,8 +297,11 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice.
 - **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified 2026-10-12, re-verified 2026-10-13); `muse/muse-wonder-1.0 @ high` (smoke-verified 2026-10-13; needs one supervised cycle before pinning); `grok/grok-4.7 @ default` (smoke-verified 2026-10-13; supersedes grok-4.6). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
 - **Swap rule:** changing a role's pinned model requires re-running that role's recent evaluations (or one supervised task cycle) before unsupervised work.
-- **Writable harness for writing roles.** backend, frontend, polish, and qa must run with workspace write access. Several CLIs default to read-only in non-interactive mode and then silently return analysis instead of edits. Use `codex exec --sandbox workspace-write ...` and `claude -p --permission-mode acceptEdits ...`. On muse or grok, pass the CLI's equivalent workspace-write permission and record it in `decisions.md` on first use. Never use full-access or bypass modes without recorded approval.
+- **Writable harness for writing roles.** backend, frontend, polish, and qa must run with workspace write access. Several CLIs default to read-only in non-interactive mode and then silently return analysis instead of edits. Use `codex exec --sandbox workspace-write ...`, `claude -p --permission-mode acceptEdits ...`, `grok -p ... --permission-mode acceptEdits`, and `muse exec ...` (headless muse is `muse exec`; `muse -p` is not a valid flag). Record the permission setting each harness used in `decisions.md` the first time. Never use full-access or bypass modes without recorded approval.
 - **Empty diff = failed step.** When an implementation step returns, planning checks `git status`/`git diff` in the step's worktree. No changes in the assigned paths means the step failed (usually a read-only sandbox). Re-dispatch it; never accept it as complete.
+- **Read-only steps** (audits, reviews, investigations with no edits in scope) may run read-only. For them, an empty or missing report is the failed-step signal.
+- **Browser capability.** If a role's pinned harness has no browser tools, its browser work runs in a harness that has them (for example Claude with Claude in Chrome) and is recorded as a substitution. The verdict stays with the role. qa can split a step: source tracing on its pin, live browser validation in the browser-capable harness.
+- **Repo verification limits.** A repo may restrict local verification (CI-only full suites, one test process at a time) by recording the rule in its `decisions.md`, and that overrides the default verification steps. Under such limits, qa may still run one named test file to tell a test-setup failure from a product failure, as long as no other test process is running. Never `git stash` while lanes run in parallel worktrees: the stash is shared across all of them.
 
 ## QA review checklist
 
@@ -291,6 +312,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - [ ] User-facing copy checks scan rendered text and the accessible attributes `aria-label`, `title`, `alt`, and `placeholder`.
 - [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human). Any finding they would raise is fixed through the owning role before push.
 - [ ] Baseline commands pass with no new warnings; browser/e2e validation done for user-facing flows.
+- [ ] Browser evidence for user-facing changes: a screenshot of every changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Saved under `.sectorfive/evidence/<plan id>/` and handed to planning, who publishes them to the PR (see Delivery).
 - [ ] No dangerous action taken without recorded approval.
 - [ ] Completion report present and accurate.
 
@@ -298,6 +320,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 
 ## Changelog
 
+- v4.2: a Delivery section: planning pushes after qa's approval, opens the PR, publishes evidence through the `sectorfive-evidence` branch, watches checks, routes review feedback, and records a closeout; the user merges. Also: a confident dispatcher disagreement (`override`, at or above `--trust` 0.90) wins over the ownership map, which planning then amends. Two role rules still win over the dispatcher: tests belong to qa, and qa never edits product code. Headless muse is `muse exec`. Read-only steps are exempt from the writable-harness rule. Browser work runs in a browser-capable harness. qa captures browser evidence (screenshots and recordings) for planning to publish. Repos can set verification limits, and under them qa may run one named test file. No `git stash` across parallel worktrees. planning may run the formatter on a lane's changed files. (kiaora D14–D21, 2026-10-14.)
 - v4.1: writing roles run on a writable harness (`codex exec --sandbox workspace-write`), and an empty diff counts as a failed step. The qa checklist adds a stale-assertion sweep, accessible-attribute copy scans, and an adversarial pre-PR review. Dispatcher role criteria assign product-code fixes to the role that owns the files and test-writing to qa. (Lessons from the kiaora rollout, 2026-10-13.)
 - v4: dispatch required when enabled; init interview (dispatcher on/pending/off, Clef option, fallbackMode default `pinned`, multi/single harness) persisted to `.sectorfive/config.json`; planning startup mode banner; unrouted steps flagged; qa veto for unflagged unrouted dispatch.
 - v3: generic role names (planning/backend/frontend/polish/qa); pinned (harness, model, effort) defaults with live verification; Jev-first dispatcher with `tools/dispatch.py` reference implementation, confidence threshold, tier choice, and outcome log; install-relative contract resolution (no absolute paths); `dispatch-log.jsonl` in `.sectorfive/` schema.

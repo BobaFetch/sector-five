@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "sector-five",
   "displayName": "Sector Five",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa) using its operating contract, role boundaries, and handoff protocols.",
   "compat": {
     "source": "native",
