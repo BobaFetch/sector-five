@@ -113,3 +113,29 @@ Live smoke test on two open yonaka PRs (read-only, `--no-log`):
   findings.
 - One of the PRs reported a single CI check where its neighbor reported 22.
   That led to the `ci.required` option.
+
+## 2026-10-16 — done check fixes from yonaka D22 (v0.4.1, contract v5.1)
+
+yonaka's merge-readiness session (D22) used "open + Greptile 5/5 + CI green +
+no conflicts" as its merge gate. It showed three gaps in the v0.4.0 done check:
+
+- **A score after a push.** A Greptile 5/5 dropped to 4/5 after a push, but
+  `botScore` took the latest score whatever commit it was for. It now counts a
+  score only for the head commit. Greptile's summary names the reviewed commit,
+  so `commitPattern` matches it exactly; otherwise the review's commit or the
+  comment's last-edit time is used.
+- **CI against an old base.** CI tests the merge with the base, so a branch
+  went red twice after main moved. A new `mergeable` check, on by default,
+  fails on conflicts. `maxBehind` is opt-in, because in a repo merging dozens
+  of PRs a day every branch is always behind.
+- **Docs-only commits.** Four markdown-only commits got no Actions runs, which
+  would have left `ci` pending forever. `ci.docsOnly` lets the newest code
+  commit's checks stand in, and the output names that commit.
+
+Live read-only run (`--no-log`) on the 4 open yonaka PRs: 2 done, and 2 not
+done on Greptile 3/5 and 4/5 posted for their current commit. A stacked PR
+whose base branch was deleted after merging returned a 404 on the base
+comparison; that comparison is now reported as unavailable instead of crashing.
+
+Also added to the contract: two failures in a row on the same job need a
+diagnosis before a third rerun, and test doubles must match the current code.

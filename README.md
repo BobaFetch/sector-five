@@ -106,13 +106,14 @@ passing done check.
 merge, in two layers:
 
 - **Fact checks** are read from GitHub with `gh`: CI, review threads, a review
-  bot's score, a plan file, PR body sections, qa's approve, draft state.
+  bot's score (only counted for the latest commit), mergeability, a plan file,
+  PR body sections, qa's approve, draft state.
 - **Judgments** are statements the dispatcher scores against the plan, PR and
   diff. They can block a PR but never pass a failed fact.
 
 Each repo's owner configures both layers in `.sectorfive/done.json`. Without
-it, the defaults are CI green, threads resolved, qa approve on head, and not a
-draft. Every option is in the
+it, the defaults are CI green, threads resolved, qa approve on head, not a
+draft, and no conflicts with the base. Every option is in the
 [runbook's `done.json` reference](plugin/docs/runbook.md#donejson-reference).
 
 ## Update / rollback

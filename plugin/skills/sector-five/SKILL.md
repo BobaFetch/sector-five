@@ -150,8 +150,8 @@ Each issue in flight has a state file, `.sectorfive/work/<issue>.json`:
 - `work show` lists every item and its phase.
 
 `dispatch.py done --issue <key>` decides whether the PR is ready for the user.
-Fact checks (CI, review threads, bot score, plan file, PR body sections, qa
-approve on head, draft) come from GitHub via `gh`; then the dispatcher scores
+Fact checks (CI, review threads, bot score for the head commit, mergeability,
+plan file, PR body sections, qa approve on head, draft) come from GitHub via `gh`; then the dispatcher scores
 the repo's judgment statements. Exit 0 done, 4 not done or blocked, 7 pending
 (re-run later), 3 escalate. The rules are owner-configured in
 `.sectorfive/done.json`; `docs/runbook.md` documents every option.

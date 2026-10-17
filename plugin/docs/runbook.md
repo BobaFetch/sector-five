@@ -176,7 +176,7 @@ except `version`, and only the checks listed under `checks` run. Without the
 file, the defaults are:
 
 ```json
-{ "version": 1, "checks": { "ci": {}, "reviewThreads": {}, "qa": {}, "draft": {} } }
+{ "version": 1, "checks": { "ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}, "mergeable": {} } }
 ```
 
 A fuller example:
@@ -185,9 +185,20 @@ A fuller example:
 {
   "version": 1,
   "checks": {
-    "ci": { "required": ["build", "test"], "ignore": ["preview-deploy"], "allowPreexisting": true },
+    "ci": {
+      "required": ["build", "test"],
+      "ignore": ["preview-deploy"],
+      "allowPreexisting": true,
+      "docsOnly": [".plans/**", "*.md", "**/*.md"]
+    },
     "reviewThreads": { "ignoreOutdated": false },
-    "botScore": { "author": "greptile", "pattern": "Confidence Score: (\\d+)/5", "min": 5 },
+    "botScore": {
+      "author": "greptile",
+      "pattern": "greptile_confidence_score:(\\d+)",
+      "min": 5,
+      "commitPattern": "Last reviewed commit:.*?/commit/([0-9a-f]{7,40})"
+    },
+    "mergeable": { "maxBehind": 50 },
     "planFile": { "glob": ".plans/done/*{issue}*.md" },
     "prBody": { "sections": ["Summary", "Resolves", "Plan", "Verification"] },
     "qa": {},
@@ -215,9 +226,10 @@ A fuller example:
 
 | Check | Options | Passes when |
 | --- | --- | --- |
-| `ci` | `required` (check names that must be present), `ignore` (names to skip), `allowPreexisting` (bool, default false) | every reported check finished green, and every `required` check is present. With `allowPreexisting`, failures named in the work item's `ci.preexisting` are excused. No checks yet or any still running → pending. |
+| `ci` | `required` (check names that must be present), `ignore` (names to skip), `allowPreexisting` (bool, default false), `docsOnly` (path globs) | every reported check finished green, and every `required` check is present. With `allowPreexisting`, failures named in the work item's `ci.preexisting` are excused. With `docsOnly`, when the head has no checks and every commit above the newest code commit only touched matching paths, that code commit's checks count (the output names it). No checks yet or any still running → pending. |
 | `reviewThreads` | `ignoreOutdated` (bool, default false) | no unresolved review threads |
-| `botScore` | `author` (substring of the bot's login), `pattern` (regex with one capture group for the score), `min` (number); all required | the bot's latest matching score is at least `min`. No score yet → pending. |
+| `botScore` | `author` (substring of the bot's login), `pattern` (regex with one capture group for the score), `min` (number), all required; `commitPattern` (regex capturing the SHA the bot says it reviewed) | the bot's latest score is at least `min` and is for the head commit. The reviewed commit comes from `commitPattern`, else from the review's own commit, else from comparing the comment's last edit with the head commit's time. No score yet, or a score for an older commit → pending. |
+| `mergeable` | `maxBehind` (integer, optional) | GitHub reports no conflicts with the base, and the head is at most `maxBehind` commits behind it when that is set. Still computing → pending. Set `maxBehind` when CI must have run against a recent base; leave it out in busy repos where every branch is always behind. |
 | `planFile` | `glob` (required; `{issue}` is replaced by the key), `caseInsensitive` (bool, default true) | a file on the PR's head commit matches |
 | `prBody` | `sections` (required list) | each name starts a line of the body, as a heading (`## Plan`), bold (`**Plan**`) or plain text (`Resolves ENG-123`) |
 | `qa` | none | the work item has qa `approve` with `qa.sha` equal to the PR head |
@@ -275,7 +287,10 @@ repo that has `.sectorfive/`. Use it to recalibrate thresholds and criteria.
 - `check` exits 6 → stderr names the file. For `config.json`, re-run the init
   interview. For `done.json`, fix the option it names.
 - `done` stays `pending` → a check never finishes or the bot never scores. Name
-  the check in `ci.required`/`ignore`, or hand the watch to the user.
+  the check in `ci.required`/`ignore`, or hand the watch to the user. A head
+  with no CI at all after a docs-only push needs `ci.docsOnly`.
+- `botScore` says the score is for an older commit → the bot hasn't reviewed
+  the latest push yet; wait for it instead of reusing the old score.
 - `all providers failed` → check keys, then network, then `--timeout`.
 - `provider answer missing ...` → provider changed shape; inspect with
   `--format json` and report.

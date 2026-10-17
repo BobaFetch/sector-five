@@ -608,17 +608,19 @@ def cmd_work(args):
 
 DEFAULT_RULES = {
     "version": 1,
-    "checks": {"ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}},
+    "checks": {"ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}, "mergeable": {}},
     "judgments": [],
 }
 CHECK_KEYS = {
-    "ci": {"allowPreexisting": bool, "ignore": list, "required": list},
+    "ci": {"allowPreexisting": bool, "ignore": list, "required": list, "docsOnly": list},
     "reviewThreads": {"ignoreOutdated": bool},
-    "botScore": {"author": str, "pattern": str, "min": (int, float)},
+    "botScore": {"author": str, "pattern": str, "min": (int, float),
+                 "commitPattern": str},
     "planFile": {"glob": str, "caseInsensitive": bool},
     "prBody": {"sections": list},
     "qa": {},
     "draft": {},
+    "mergeable": {"maxBehind": int},
 }
 EVIDENCE = ("plan", "pr", "qa", "reviews", "diff")
 JUDGMENT_KEYS = {"id": str, "statement": str, "threshold": (int, float),
@@ -654,11 +656,17 @@ def validate_rules(rules):
         for key in ("author", "pattern", "min"):
             if key not in bot:
                 raise ValueError("checks.botScore.%s is required" % key)
-        try:
-            if re.compile(bot["pattern"]).groups < 1:
-                raise ValueError("checks.botScore.pattern needs a capture group")
-        except re.error:
-            raise ValueError("checks.botScore.pattern is not a valid regex")
+        for key in ("pattern", "commitPattern"):
+            if key not in bot:
+                continue
+            try:
+                groups = re.compile(bot[key]).groups
+            except re.error:
+                raise ValueError("checks.botScore.%s is not a valid regex" % key)
+            if groups < 1:
+                raise ValueError("checks.botScore.%s needs a capture group" % key)
+    if checks.get("mergeable", {}).get("maxBehind", 0) < 0:
+        raise ValueError("checks.mergeable.maxBehind must be 0 or more")
     if "planFile" in checks and "glob" not in checks["planFile"]:
         raise ValueError("checks.planFile.glob is required")
     if "prBody" in checks and not checks["prBody"].get("sections"):
@@ -744,8 +752,8 @@ query($owner: String!, $name: String!, $number: Int!) {
 def gather_facts(pr, rules, issue):
     """Read what the done check needs about one PR from GitHub via gh."""
     view = json.loads(gh("pr", "view", str(pr), "--json",
-                         "number,title,body,isDraft,headRefOid,statusCheckRollup,"
-                         "comments,reviews,url,files"))
+                         "number,title,body,isDraft,headRefOid,baseRefName,"
+                         "statusCheckRollup,reviews,url,files,commits,mergeable"))
     repo = json.loads(gh("repo", "view", "--json", "owner,name"))
     threads = json.loads(gh(
         "api", "graphql", "-f", "query=" + THREADS_QUERY,
@@ -760,11 +768,17 @@ def gather_facts(pr, rules, issue):
                                            f.get("deletions"))
                          for f in view.get("files") or []],
         "checks": [normalize_check(c) for c in view.get("statusCheckRollup") or []],
-        # Oldest first across comments and reviews, so the last score found wins.
-        "comments": [{"author": (c.get("author") or {}).get("login", ""),
-                      "body": c.get("body") or ""}
-                     for c in sorted((view.get("comments") or []) + (view.get("reviews") or []),
-                                     key=lambda c: c.get("createdAt") or c.get("submittedAt") or "")],
+        "headCommittedAt": ((view.get("commits") or [{}])[-1]).get("committedDate"),
+        "mergeable": view.get("mergeable"),
+        # Oldest first, so the last score found wins. Bots edit their summary
+        # comment in place, so a comment counts from its last edit.
+        "comments": sorted(
+            issue_comments(pr) +
+            [{"author": (r.get("author") or {}).get("login", ""),
+              "body": r.get("body") or "", "at": r.get("submittedAt"),
+              "commit": (r.get("commit") or {}).get("oid")}
+             for r in view.get("reviews") or []],
+            key=lambda c: c.get("at") or ""),
         "threads": [{"resolved": t["isResolved"], "outdated": t["isOutdated"],
                      "author": ((t["comments"]["nodes"] or [{}])[0].get("author") or {})
                      .get("login", ""),
@@ -773,6 +787,16 @@ def gather_facts(pr, rules, issue):
     }
     checks = rules.get("checks", {})
     judgments = rules.get("judgments", [])
+    if "mergeable" in checks:
+        try:
+            facts["behindBy"] = int(gh(
+                "api", "repos/{owner}/{repo}/compare/%s...%s" % (
+                    view["baseRefName"], facts["headSha"]), "--jq", ".behind_by").strip())
+        except (RuntimeError, ValueError):
+            facts["behindBy"] = None  # e.g. the base branch was deleted
+    if not facts["checks"] and checks.get("ci", {}).get("docsOnly"):
+        docs_only_fallback(facts, [c["oid"] for c in view.get("commits") or []],
+                           checks["ci"]["docsOnly"])
     if "planFile" in checks or any("plan" in j.get("evidence", EVIDENCE) for j in judgments):
         tree = gh("api", "repos/{owner}/{repo}/git/trees/%s?recursive=1" % facts["headSha"],
                   "--jq", ".tree[] | select(.type == \"blob\") | .path")
@@ -786,6 +810,37 @@ def gather_facts(pr, rules, issue):
     if any("diff" in j.get("evidence", EVIDENCE) for j in judgments):
         facts["diff"] = gh("pr", "diff", str(pr))
     return facts
+
+
+def issue_comments(pr):
+    out = gh("api", "--paginate", "repos/{owner}/{repo}/issues/%d/comments" % int(pr),
+             "--jq", ".[] | {author: .user.login, body: .body, at: .updated_at}")
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def commit_checks(sha):
+    runs = gh("api", "--paginate", "repos/{owner}/{repo}/commits/%s/check-runs" % sha,
+              "--jq", ".check_runs[] | {name, status, conclusion}")
+    statuses = gh("api", "repos/{owner}/{repo}/commits/%s/status" % sha,
+                  "--jq", ".statuses[] | {context, state}")
+    return [normalize_check(json.loads(line))
+            for line in (runs + "\n" + statuses).splitlines() if line.strip()]
+
+
+def docs_only_fallback(facts, commits, globs):
+    """The head has no checks. If every commit above the newest one with CI
+    touched only docs, use that commit's checks (CI often skips docs-only pushes)."""
+    skipped = 0
+    for sha in reversed(commits):
+        files = gh("api", "repos/{owner}/{repo}/commits/%s" % sha,
+                   "--jq", ".files[].filename").split()
+        if files and all(any(fnmatch.fnmatchcase(f, g) for g in globs) for f in files):
+            skipped += 1
+            continue
+        if skipped:
+            facts["checks"] = commit_checks(sha)
+            facts["checksFrom"] = {"sha": sha, "docsOnlyCommits": skipped}
+        return
 
 
 def normalize_check(check):
@@ -810,6 +865,24 @@ def match_plan_file(files, opts, issue):
         if fnmatch.fnmatchcase(path.lower() if fold else path,
                                pattern.lower() if fold else pattern):
             return path
+    return None
+
+
+def score_is_stale(comment, opts, facts):
+    """Return what the score was for when it predates the head, else None."""
+    head = facts.get("headSha") or ""
+    reviewed = None
+    if opts.get("commitPattern"):
+        found = re.search(opts["commitPattern"], comment["body"])
+        if found:
+            reviewed = found.group(1)
+    reviewed = reviewed or comment.get("commit")
+    if reviewed and head:
+        same = head.startswith(reviewed) or reviewed.startswith(head)
+        return None if same else reviewed[:12]
+    at, head_at = comment.get("at"), facts.get("headCommittedAt")
+    if at and head_at and at < head_at:
+        return "an earlier commit (scored %s)" % at
     return None
 
 
@@ -845,6 +918,10 @@ def evaluate_facts(rules, facts, item):
             results["ci"] = fact("pass", "%d checks passed%s" % (
                 len(runs) - len(excused),
                 "; pre-existing failures: " + ", ".join(excused) if excused else ""))
+        source = facts.get("checksFrom")
+        if source:
+            results["ci"]["detail"] += " (on %s; %d docs-only commit(s) above had no CI)" % (
+                source["sha"][:12], source["docsOnlyCommits"])
     if "reviewThreads" in checks:
         skip_outdated = checks["reviewThreads"].get("ignoreOutdated", False)
         open_threads = [t for t in facts.get("threads", [])
@@ -856,17 +933,22 @@ def evaluate_facts(rules, facts, item):
     if "botScore" in checks:
         opts = checks["botScore"]
         pattern = re.compile(opts["pattern"])
-        score = None
+        score = scored = None
         for comment in facts.get("comments", []):
             if opts["author"].lower() in comment["author"].lower():
                 found = pattern.search(comment["body"])
                 if found:
                     try:
-                        score = float(found.group(1))
+                        score, scored = float(found.group(1)), comment
                     except ValueError:
                         pass
+        stale = score is not None and score_is_stale(scored, opts, facts)
         if score is None:
             results["botScore"] = fact("pending", "no %s score posted" % opts["author"])
+        elif stale:
+            # A new push resets the review: wait for the bot to score this head.
+            results["botScore"] = fact("pending", "score %g is for %s, head is %s" % (
+                score, stale, (facts.get("headSha") or "?")[:12]))
         else:
             results["botScore"] = fact(
                 "pass" if score >= opts["min"] else "fail",
@@ -893,6 +975,22 @@ def evaluate_facts(rules, facts, item):
                 (qa.get("sha") or "?")[:12], (facts.get("headSha") or "?")[:12]))
         else:
             results["qa"] = fact("pass", "approve on head")
+    if "mergeable" in checks:
+        state = (facts.get("mergeable") or "UNKNOWN").upper()
+        behind = facts.get("behindBy")
+        limit = checks["mergeable"].get("maxBehind")
+        if state == "CONFLICTING":
+            results["mergeable"] = fact("fail", "conflicts with the base branch")
+        elif state != "MERGEABLE":
+            results["mergeable"] = fact("pending", "GitHub is still computing mergeability")
+        elif limit is not None and behind is None:
+            results["mergeable"] = fact("pending", "could not compare with the base branch")
+        elif limit is not None and behind > limit:
+            results["mergeable"] = fact("fail", "%d commits behind base (max %d): merge "
+                                        "the base in and let CI run again" % (behind, limit))
+        else:
+            results["mergeable"] = fact("pass", "no conflicts" + (
+                "; %d commits behind base" % behind if behind else ""))
     if "draft" in checks:
         results["draft"] = fact("fail", "PR is a draft") if facts.get("isDraft") \
             else fact("pass", "ready for review")

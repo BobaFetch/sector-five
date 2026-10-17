@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v5. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v5.1. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -262,10 +262,11 @@ planning owns delivery; qa's `approve` gates it; the user merges.
    - Keep files small (compressed PNG, short GIFs). In a private repo, the images show only for people with repo access.
    - Pruning the evidence branch means rewriting its history, which is a dangerous action (ask first).
 4. **Watch to a terminal state.** Whoever opens the PR owns it until `dispatch.py done` returns `done` or `not_done`. `pending` (exit 7) means checks are still running or a review bot hasn't scored yet: re-run later. A long wait ends the turn with a named watch (what is pending and where the result will land) and a report when it resolves. If the watch can't be finished, hand it to the user explicitly; never drop it silently. A CI failure goes back to the owning role through planning.
-5. **Verdicts land on completed CI only.** qa never approves on a partial or still-running suite, and implementers never claim green from a partial run. A failure is treated as pre-existing only with evidence (identical on the base, or passing in isolation), recorded with `work set ci.preexisting=<check names>`.
-6. **Review feedback.** For each bot finding, planning sends a fix to the owning role, gets qa's `approve` again on the new head, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
-7. **Read back every external write.** An issue update, PR body, comment or thread reply is reported as done only after reading the field back and confirming its content, never from a command's exit status alone.
-8. **Merge and close out.** When the done check passes, planning advances the work item to `done` and hands the PR to the user. The user merges unless the repo records otherwise; the team never merges. After the merge, `work advance --to merged` appends the `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, check status, review threads by author). Review findings per PR are the team's quality metric.
+5. **Verdicts land on completed CI only.** qa never approves on a partial or still-running suite, and implementers never claim green from a partial run. A failure is treated as pre-existing only with evidence (identical on the base, or passing in isolation), recorded with `work set ci.preexisting=<check names>`. CI usually tests the merge of the PR into its base, not the head alone, so a green local tree can still fail after the base moves. Merge the base in, update drifted assertions, and run again.
+6. **Reruns.** A known infrastructure flake (toolchain or package download errors, dropped cloud connections) may be rerun with `gh run rerun <run id> --failed`. Two failures in a row on the same job need a diagnosis before a third run. Repeated failures are usually real (for example, drift from the base).
+7. **Review feedback.** For each bot finding, planning sends a fix to the owning role, gets qa's `approve` again on the new head, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
+8. **Read back every external write.** An issue update, PR body, comment or thread reply is reported as done only after reading the field back and confirming its content, never from a command's exit status alone.
+9. **Merge and close out.** When the done check passes, planning advances the work item to `done` and hands the PR to the user. The user merges unless the repo records otherwise; the team never merges. After the merge, `work advance --to merged` appends the `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, check status, review threads by author). Review findings per PR are the team's quality metric.
 
 ### Work items and the done check
 
@@ -285,10 +286,10 @@ Phases advance one at a time. Moving back (for example `review` → `building` a
 
 **The done check** (`dispatch.py done --issue <key>`) decides whether a PR is ready to hand to the user. It has two layers:
 
-- **Fact checks**, read from GitHub with `gh` and from the work item: CI, review threads, a review bot's score, a plan file on the branch, PR body sections, qa's approve on the head SHA, draft state. A failed fact means `not_done` (exit 4); a running check or a missing bot score means `pending` (exit 7). The dispatcher is never asked to overrule a fact.
+- **Fact checks**, read from GitHub with `gh` and from the work item: CI, review threads, a review bot's score, mergeability, a plan file on the branch, PR body sections, qa's approve on the head SHA, draft state. A review bot's score counts only for the commit it reviewed. After a push, the check waits for a new score. A failed fact means `not_done` (exit 4); a running check or a missing bot score means `pending` (exit 7). The dispatcher is never asked to overrule a fact.
 - **Judgments**, which run only after every fact passes: statements the dispatcher scores (`noul`) against the evidence each one names (plan, PR, qa report, review comments, diff). A score at or above the statement's threshold means `blocked` (exit 4). If the dispatcher is unavailable, the verdict is `escalate` (exit 3) unless the repo chose `facts_only`.
 
-Each repo's owner sets the rules in `.sectorfive/done.json`: which fact checks run and with what options, and which judgments to ask with what thresholds. The file is validated strictly, so a typo fails `check` instead of silently weakening the gate. Without the file, the defaults are CI passed, review threads resolved, qa approve on head, and not a draft. `docs/runbook.md` documents every option.
+Each repo's owner sets the rules in `.sectorfive/done.json`: which fact checks run and with what options, and which judgments to ask with what thresholds. The file is validated strictly, so a typo fails `check` instead of silently weakening the gate. Without the file, the defaults are CI passed, review threads resolved, qa approve on head, not a draft, and no conflicts with the base. `docs/runbook.md` documents every option.
 
 Every `done` run is logged and stored on the work item. Comparing done verdicts with later review findings and follow-up fixes is how the judgment thresholds get calibrated.
 
@@ -340,6 +341,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - [ ] Contracts unchanged or changed exactly as planned, with migration verified.
 - [ ] Tests cover the new/changed behavior; no weakened or deleted coverage without plan approval.
 - [ ] Existing assertions still match the new behavior. Search the whole test tree (unit, integration, e2e, smoke) for the old values the diff changed: routes, URLs, copy, config keys, and redirect targets. Update or retire every stale assertion, not just the tests next to the diff.
+- [ ] Test doubles match the current code: a mock of a component or module mirrors its current props and exports. When a test breaks because the contract changed, assert the test's original intent against the new contract instead of restoring what was removed.
 - [ ] User-facing copy checks scan rendered text and the accessible attributes `aria-label`, `title`, `alt`, and `placeholder`.
 - [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human). Any finding they would raise is fixed through the owning role before push.
 - [ ] Baseline commands pass with no new warnings; browser/e2e validation done for user-facing flows.
@@ -352,6 +354,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.1: the done check adds a `mergeable` fact (conflicts, and optionally how far behind the base), and counts a review bot's score only when it is for the head commit. With `ci.docsOnly`, a head whose docs-only commits got no CI uses the checks of the newest commit below that touched code. Delivery adds the rerun rule (two failures on the same job need a diagnosis) and notes that CI tests the merge with the base. The qa checklist adds that test doubles must match the current code. (yonaka D22, 2026-10-15.)
 
 - v5: work items, one state file per issue (`.sectorfive/work/<issue>.json`) with phases advanced by `dispatch.py work` only when their requirements hold. A done check (`dispatch.py done`): owner-configured rules in `.sectorfive/done.json`, with fact checks read from GitHub and judgments scored by the dispatcher, which can block but never pass a failed fact. Delivery adds watching a PR to a terminal state, verdicts only on completed CI, evidence for pre-existing failures, and reading back every external write. `route` and `unrouted` take `--issue`, and the closeout line is written on `work advance --to merged`. (From yonaka's execute-to-PR standard and parallel-work request, 2026-10-15.)
 

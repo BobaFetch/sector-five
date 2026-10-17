@@ -510,7 +510,8 @@ if __name__ == "__main__":
 def pr_facts(**overrides):
     facts = {
         "pr": 12, "title": "fix: thing. ENG-1", "isDraft": False,
-        "headSha": "abc123def456",
+        "headSha": "abc123def456", "headCommittedAt": "2026-10-15T10:00:00Z",
+        "mergeable": "MERGEABLE", "behindBy": 0,
         "body": "## Summary\nx\n\nResolves ENG-1\n\n## Plan\np\n\n## Verification\nv",
         "checks": [{"name": "build", "status": "success"},
                    {"name": "test", "status": "success"}],
@@ -571,6 +572,11 @@ class RulesValidationTest(unittest.TestCase):
             {"version": 1, "judgments": [{"id": "a", "statement": "s",
                                           "evidence": ["logs"]}]},
             {"version": 1, "judgment": {"onUnavailable": "ignore"}},
+            {"version": 1, "checks": {"botScore": {"author": "g", "pattern": "(x)",
+                                                   "min": 5, "commitPattern": "x"}}},
+            {"version": 1, "checks": {"mergeable": {"maxBehind": -1}}},
+            {"version": 1, "checks": {"mergeable": {"maxBehind": 1.5}}},
+            {"version": 1, "checks": {"ci": {"docsOnly": "*.md"}}},
             {"version": 1, "judgment": {"maxStateChars": 10}},
         ]
         for rules in bad:
@@ -625,6 +631,50 @@ class FactsTest(unittest.TestCase):
         facts = pr_facts(comments=[{"author": "someone", "body": "Confidence Score: 5/5"}])
         self.assertEqual(self.statuses(facts)["botScore"], "pending")
 
+    def test_bot_score_must_be_for_head(self):
+        rules = {"version": 1, "checks": {"botScore": {
+            "author": "greptile", "pattern": r"greptile_confidence_score:(\d+)",
+            "min": 5, "commitPattern": r"/commit/([0-9a-f]{7,40})"}}}
+        body = "<!-- greptile_confidence_score:5 --> Last reviewed commit: x/commit/%s"
+        fresh = pr_facts(comments=[{"author": "greptile-apps[bot]",
+                                    "body": body % "abc123def456"}])
+        self.assertEqual(self.statuses(fresh, rules)["botScore"], "pass")
+        stale = pr_facts(comments=[{"author": "greptile-apps[bot]",
+                                    "body": body % "0000000aaaa"}])
+        result = dispatch.evaluate_facts(rules, stale, self.ITEM)["botScore"]
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("is for 0000000aaaa", result["detail"])
+        # A review carries its commit; a comment without one falls back to time.
+        review = pr_facts(comments=[{"author": "greptile", "commit": "fff",
+                                     "body": "greptile_confidence_score:5"}])
+        self.assertEqual(self.statuses(review, rules)["botScore"], "pending")
+        early = pr_facts(comments=[{"author": "greptile", "at": "2026-10-15T09:00:00Z",
+                                    "body": "greptile_confidence_score:5"}])
+        self.assertEqual(self.statuses(early, rules)["botScore"], "pending")
+        late = pr_facts(comments=[{"author": "greptile", "at": "2026-10-15T11:00:00Z",
+                                   "body": "greptile_confidence_score:5"}])
+        self.assertEqual(self.statuses(late, rules)["botScore"], "pass")
+
+    def test_mergeable(self):
+        rules = {"version": 1, "checks": {"mergeable": {}}}
+        self.assertEqual(self.statuses(pr_facts(behindBy=40), rules)["mergeable"], "pass")
+        self.assertEqual(self.statuses(pr_facts(mergeable="CONFLICTING"),
+                                       rules)["mergeable"], "fail")
+        self.assertEqual(self.statuses(pr_facts(mergeable="UNKNOWN"),
+                                       rules)["mergeable"], "pending")
+        strict = {"version": 1, "checks": {"mergeable": {"maxBehind": 0}}}
+        self.assertEqual(self.statuses(pr_facts(behindBy=1), strict)["mergeable"], "fail")
+        self.assertEqual(self.statuses(pr_facts(), strict)["mergeable"], "pass")
+        self.assertEqual(self.statuses(pr_facts(behindBy=None), strict)["mergeable"],
+                         "pending")
+        self.assertEqual(self.statuses(pr_facts(behindBy=None), rules)["mergeable"], "pass")
+
+    def test_ci_detail_names_docs_only_source(self):
+        facts = pr_facts(checksFrom={"sha": "c0de" * 10, "docsOnlyCommits": 2})
+        result = dispatch.evaluate_facts(FULL_RULES, facts, self.ITEM)["ci"]
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("2 docs-only commit(s)", result["detail"])
+
     def test_plan_file_body_qa_draft(self):
         facts = pr_facts(files=["src/a.ts"], body="## Summary", isDraft=True,
                          headSha="ffff")
@@ -642,6 +692,34 @@ class FactsTest(unittest.TestCase):
             "glob": ".plans/done/*{issue}*.md", "caseInsensitive": False}}}
         facts = pr_facts(files=[".plans/done/2026-eng-1-x.md"])
         self.assertEqual(self.statuses(facts, rules)["planFile"], "fail")
+
+
+class DocsOnlyFallbackTest(unittest.TestCase):
+    FILES = {"code1": "src/a.ts", "doc1": ".plans/done/x.md", "doc2": "README.md"}
+
+    def fake_gh(self, *argv):
+        path = argv[-3] if argv[0] == "api" and "--jq" in argv else ""
+        sha = path.split("/")[4] if path.count("/") >= 4 else ""
+        if path.endswith("/check-runs"):
+            return '{"name": "test", "status": "completed", "conclusion": "success"}\n'
+        if path.endswith("/status"):
+            return ""
+        return self.FILES[sha] + "\n"
+
+    def run_fallback(self, commits):
+        facts = {"checks": []}
+        with mock.patch.object(dispatch, "gh", side_effect=self.fake_gh):
+            dispatch.docs_only_fallback(facts, commits, [".plans/*", "*.md"])
+        return facts
+
+    def test_uses_newest_code_commit(self):
+        facts = self.run_fallback(["code1", "doc1", "doc2"])
+        self.assertEqual(facts["checksFrom"], {"sha": "code1", "docsOnlyCommits": 2})
+        self.assertEqual(facts["checks"], [{"name": "test", "status": "success"}])
+
+    def test_code_head_keeps_no_checks(self):
+        facts = self.run_fallback(["doc1", "code1"])
+        self.assertEqual(facts, {"checks": []})
 
 
 class FitDiffTest(unittest.TestCase):
@@ -864,7 +942,8 @@ class DoneCmdTest(WorkRepoCase):
         self.assertEqual(code, 0)
         decision = json.loads(out)
         self.assertEqual(decision["rules"], "defaults")
-        self.assertEqual(set(decision["facts"]), {"ci", "reviewThreads", "qa", "draft"})
+        self.assertEqual(set(decision["facts"]),
+                         {"ci", "reviewThreads", "qa", "draft", "mergeable"})
 
     def test_check_reports_rules(self):
         with open(os.path.join(self.meta, "done.json"), "w") as fh:
