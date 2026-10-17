@@ -69,3 +69,73 @@ can't close it, so `route --expect <planned role>` now makes any disagreement
 escalate (`mismatch`, exit 3), and the log records `expected_role`. That turns
 future runs into labeled calibration data. Revisit once yonaka has about 50
 `expected_role` rows.
+
+## 2026-10-15 — work items and the done check (v0.4.0, contract v5)
+
+yonaka ran up to 9 implementers in parallel. The parallelism held, but the
+handoffs between phases didn't:
+
+- 9 PRs shipped with no plan file until one was added later.
+- qa approved before CI finished.
+- Branches touching the same files were caught late.
+- Nobody watched the PRs after opening them.
+- The dispatch log stopped growing even though about 19 PRs were opened.
+
+The repo asked for queues (one per phase).
+
+Chosen for now: one state file per issue, with phases advanced only by
+`dispatch.py work advance` when each phase's requirements hold. This needs no
+runtime support (agents can't wait on events, so a real queue would mean
+polling). The file keeps fixed fields so it can later become a queue entry.
+Real queues, and possibly a kanban/issue board, wait for a UI wrapper once the
+roles have settled.
+
+"Done" is a separate check, `dispatch.py done`, with two layers:
+
+- Fact checks are read from GitHub and decided by code.
+- Judgments are scored by the dispatcher. They run only after every fact
+  passes, and they can block but never pass.
+
+This keeps a confident model from calling a PR done while its CI is red. Each
+repo's owner configures both layers in `.sectorfive/done.json`, which is
+validated strictly.
+
+Live smoke test on two open yonaka PRs (read-only, `--no-log`):
+
+- The fact checks matched what was on GitHub (a draft, a missing Greptile
+  score, no recorded qa approve).
+- A first judgment run blocked on "untested behavior". The 65k-char diff had
+  been cut at 16k, before the test files, so Jev never saw them.
+- The state now lists every changed file and gives each file a fair share of
+  the diff. With that, the same PR scored 0.43 and 0.41 (both pass).
+- These scores are close to their thresholds, so the defaults are starting
+  points. Calibrate them from logged `done` lines against later review
+  findings.
+- One of the PRs reported a single CI check where its neighbor reported 22.
+  That led to the `ci.required` option.
+
+## 2026-10-16 — done check fixes from yonaka D22 (v0.4.1, contract v5.1)
+
+yonaka's merge-readiness session (D22) used "open + Greptile 5/5 + CI green +
+no conflicts" as its merge gate. It showed three gaps in the v0.4.0 done check:
+
+- **A score after a push.** A Greptile 5/5 dropped to 4/5 after a push, but
+  `botScore` took the latest score whatever commit it was for. It now counts a
+  score only for the head commit. Greptile's summary names the reviewed commit,
+  so `commitPattern` matches it exactly; otherwise the review's commit or the
+  comment's last-edit time is used.
+- **CI against an old base.** CI tests the merge with the base, so a branch
+  went red twice after main moved. A new `mergeable` check, on by default,
+  fails on conflicts. `maxBehind` is opt-in, because in a repo merging dozens
+  of PRs a day every branch is always behind.
+- **Docs-only commits.** Four markdown-only commits got no Actions runs, which
+  would have left `ci` pending forever. `ci.docsOnly` lets the newest code
+  commit's checks stand in, and the output names that commit.
+
+Live read-only run (`--no-log`) on the 4 open yonaka PRs: 2 done, and 2 not
+done on Greptile 3/5 and 4/5 posted for their current commit. A stacked PR
+whose base branch was deleted after merging returned a 404 on the base
+comparison; that comparison is now reported as unavailable instead of crashing.
+
+Also added to the contract: two failures in a row on the same job need a
+diagnosis before a third rerun, and test doubles must match the current code.

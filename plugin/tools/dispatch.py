@@ -5,17 +5,24 @@ Stdlib-only. Reads keys from the environment or a gitignored `.env` at the
 sector-five repo root (never committed, never printed).
 
 Exit codes:
-  0  routed or override (route) / proceed (gate) / ready or off (check) / recorded (unrouted)
+  0  routed or override (route) / proceed (gate) / ready or off (check) /
+     recorded (unrouted) / done (done) / ok (work)
   2  usage or provider error (message on stderr)
-  3  escalate to the user (route confidence below threshold, or --expect mismatch below --trust)
-  4  blocked (gate statement holds at or above threshold)
+  3  escalate to the user (route confidence below threshold, --expect mismatch
+     below --trust, or done judgments unavailable under onUnavailable "escalate")
+  4  blocked (gate statement holds at or above threshold) / not done or blocked
+     (done) / transition refused (work advance)
   5  no credentials (check)
-  6  invalid config.json (check)
+  6  invalid config.json or done.json (check, done)
+  7  pending (done: checks still running or a bot score not posted yet)
 """
 import argparse
 import datetime
+import fnmatch
 import json
 import os
+import re
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -220,6 +227,16 @@ def cmd_check(args):
             # JSON errors can contain config contents; report no input values.
             print("dispatch: error: invalid config.json", file=sys.stderr)
             return 6
+    try:
+        rules, rules_path = load_rules(args.rules)
+    except (OSError, ValueError) as exc:
+        message = str(exc) if isinstance(exc, ValueError) and not isinstance(
+            exc, json.JSONDecodeError) else "unreadable or not JSON"
+        print("dispatch: error: invalid done.json: %s" % message, file=sys.stderr)
+        return 6
+    print("done rules: %s (%d checks, %d judgments)" % (
+        rules_path or "contract defaults", len(rules.get("checks", {})),
+        len(rules.get("judgments", []))))
     provider = args.provider or (config["dispatcher"]["provider"] if config else "auto")
     for key in ("TYPESAFE_API_KEY", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_AUTH_TOKEN"):
         print("%s: %s" % (key, "present" if os.environ.get(key) else "missing"))
@@ -253,6 +270,8 @@ def cmd_unrouted(args):
     decision = {"kind": "unrouted", "verdict": "UNROUTED", "task": args.task}
     if args.reason is not None:
         decision["reason"] = args.reason
+    if args.issue is not None:
+        decision["issue"] = args.issue
     if not args.no_log:
         append_log(dict(decision, task=args.task[:2000]))
     if args.format == "json":
@@ -315,6 +334,8 @@ def cmd_route(args):
     }
     if args.expect is not None:
         decision["expected_role"] = args.expect
+    if args.issue is not None:
+        decision["issue"] = args.issue
     if not args.no_log:
         append_log(dict(decision, task=state[:2000]))
     if args.format == "json":
@@ -360,6 +381,779 @@ def cmd_gate(args):
     return 4 if blocked else 0
 
 
+# --- Work items: one state file per issue (.sectorfive/work/<issue>.json) ---
+
+PHASES = ["planned", "building", "review", "open", "done", "merged"]
+WORK_FIELDS = {
+    "owner": "role", "branch": "str", "pr": "int", "plan": "str",
+    "qa.verdict": ("approve", "veto"), "qa.sha": "str", "qa.report": "str",
+    "ci.preexisting": "list",
+}
+ISSUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def meta_dir():
+    d = os.path.join(os.getcwd(), ".sectorfive")
+    if not os.path.isdir(d):
+        raise RuntimeError("no .sectorfive/ in the current directory")
+    return d
+
+
+def work_path(issue):
+    if not ISSUE_RE.match(issue or ""):
+        raise RuntimeError("invalid issue key %r" % issue)
+    return os.path.join(meta_dir(), "work", issue + ".json")
+
+
+def load_work(issue):
+    path = work_path(issue)
+    if not os.path.isfile(path):
+        raise RuntimeError("no work item for %s (run: work new --issue %s)"
+                           % (issue, issue))
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def save_work(item):
+    path = work_path(item["issue"])
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(item, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def new_work(issue, plan):
+    return {
+        "version": 1, "issue": issue, "phase": "planned", "plan": plan,
+        "owner": None, "branch": None, "pr": None,
+        "qa": {"verdict": None, "sha": None, "report": None},
+        "ci": {"preexisting": []},
+        "done": None,
+        "history": [{"ts": now(), "from": None, "to": "planned", "note": None}],
+    }
+
+
+def set_field(item, key, raw):
+    kind = WORK_FIELDS.get(key)
+    if kind is None:
+        raise RuntimeError("unknown field %r (allowed: %s)"
+                           % (key, ", ".join(sorted(WORK_FIELDS))))
+    if raw == "":
+        value = [] if kind == "list" else None
+    elif kind == "role":
+        if raw not in ROLES:
+            raise RuntimeError("owner must be one of %s" % ", ".join(sorted(ROLES)))
+        value = raw
+    elif kind == "int":
+        if not raw.isdigit():
+            raise RuntimeError("%s must be a number" % key)
+        value = int(raw)
+    elif kind == "list":
+        value = [part.strip() for part in raw.split(",") if part.strip()]
+    elif isinstance(kind, tuple):
+        if raw not in kind:
+            raise RuntimeError("%s must be one of %s" % (key, ", ".join(kind)))
+        value = raw
+    else:
+        value = raw
+    target = item
+    parts = key.split(".")
+    for part in parts[:-1]:
+        target = target.setdefault(part, {})
+    target[parts[-1]] = value
+
+
+def log_has_dispatch(issue):
+    path = os.path.join(meta_dir(), "dispatch-log.jsonl")
+    if not os.path.isfile(path):
+        return False
+    with open(path) as fh:
+        for line in fh:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if entry.get("issue") == issue and entry.get("kind") in ("route", "unrouted"):
+                return True
+    return False
+
+
+def dispatcher_on():
+    path = os.path.join(meta_dir(), "config.json")
+    try:
+        return load_config(path)["dispatcher"]["status"] == "on"
+    except (OSError, ValueError):
+        return False
+
+
+def transition_problems(item, target):
+    """Return the reasons `item` may not enter `target` (empty list = allowed)."""
+    current = item["phase"]
+    if target == "blocked":
+        return []
+    if target not in PHASES:
+        return ["unknown phase %r" % target]
+    if current == "merged":
+        return ["work item is already merged"]
+    if current != "blocked":
+        cur, nxt = PHASES.index(current), PHASES.index(target)
+        if nxt > cur + 1:
+            return ["advance one phase at a time (%s → %s)" % (current, PHASES[cur + 1])]
+        if nxt == cur:
+            return ["already %s" % current]
+    problems = []
+    if not item.get("plan"):
+        problems.append("no plan recorded (work set plan=<path>)")
+    if target in ("building", "review", "open", "done", "merged"):
+        if not item.get("owner"):
+            problems.append("no owner recorded (work set owner=<role>)")
+        if target == "building" and dispatcher_on() and not log_has_dispatch(item["issue"]):
+            problems.append("dispatcher is on but no route/unrouted line for "
+                            "this issue (route --issue %s ...)" % item["issue"])
+    if target in ("review", "open", "done", "merged") and not item.get("branch"):
+        problems.append("no branch recorded")
+    if target in ("open", "done", "merged"):
+        qa = item.get("qa") or {}
+        if not item.get("pr"):
+            problems.append("no PR recorded")
+        if qa.get("verdict") != "approve" or not qa.get("sha"):
+            problems.append("no qa approve recorded with the reviewed head SHA")
+    if target in ("done", "merged"):
+        done = item.get("done") or {}
+        if done.get("verdict") != "done":
+            problems.append("done check has not passed (run: done --issue %s)"
+                            % item["issue"])
+        elif done.get("sha") != (item.get("qa") or {}).get("sha"):
+            problems.append("done check ran on %s but qa approved %s; re-run both "
+                            "on the current head" % ((done.get("sha") or "?")[:12],
+                                                     ((item.get("qa") or {}).get("sha")
+                                                      or "?")[:12]))
+    return problems
+
+
+def closeout_entry(item):
+    done = item.get("done") or {}
+    facts = done.get("facts") or {}
+    entry = {"kind": "closeout", "issue": item["issue"], "pr": item.get("pr"),
+             "head_sha": done.get("sha")}
+    for name in ("ci", "reviewThreads", "botScore"):
+        if name in facts:
+            entry[name] = facts[name]
+    if "threads" in done:
+        entry["threads"] = done["threads"]
+    return entry
+
+
+def cmd_work(args):
+    if args.action == "new":
+        path = work_path(args.issue)
+        if os.path.exists(path):
+            raise RuntimeError("work item %s already exists" % args.issue)
+        item = new_work(args.issue, args.plan)
+        save_work(item)
+        print("%s: planned" % args.issue)
+        return 0
+    if args.action == "show":
+        d = os.path.join(meta_dir(), "work")
+        issues = [args.issue] if args.issue else sorted(
+            name[:-5] for name in os.listdir(d) if name.endswith(".json")
+        ) if os.path.isdir(d) else []
+        items = [load_work(issue) for issue in issues]
+        if args.format == "json":
+            print(json.dumps(items if not args.issue else items[0], indent=2))
+        else:
+            for item in items:
+                done = item.get("done") or {}
+                print("%s\t%s\t%s\tPR %s\tdone: %s" % (
+                    item["issue"], item["phase"], item.get("owner") or "-",
+                    item.get("pr") or "-", done.get("verdict") or "-"))
+        return 0
+    item = load_work(args.issue)
+    if args.action == "set":
+        for pair in args.pairs:
+            key, sep, raw = pair.partition("=")
+            if not sep:
+                raise RuntimeError("expected field=value, got %r" % pair)
+            set_field(item, key.strip(), raw.strip())
+        save_work(item)
+        print("%s: updated %s" % (args.issue, ", ".join(
+            p.partition("=")[0].strip() for p in args.pairs)))
+        return 0
+    # advance
+    if args.to == "blocked" and not args.note:
+        raise RuntimeError("blocking needs --note with the reason")
+    problems = transition_problems(item, args.to)
+    if problems:
+        for problem in problems:
+            print("refused: %s" % problem)
+        return 4
+    previous = item["phase"]
+    item["phase"] = args.to
+    item["history"].append({"ts": now(), "from": previous, "to": args.to,
+                            "note": args.note})
+    save_work(item)
+    if args.to == "merged":
+        append_log(closeout_entry(item))
+    print("%s: %s → %s" % (args.issue, previous, args.to))
+    return 0
+
+
+# --- Done check: owner-configured rules in .sectorfive/done.json ---
+
+DEFAULT_RULES = {
+    "version": 1,
+    "checks": {"ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}, "mergeable": {}},
+    "judgments": [],
+}
+CHECK_KEYS = {
+    "ci": {"allowPreexisting": bool, "ignore": list, "required": list, "docsOnly": list},
+    "reviewThreads": {"ignoreOutdated": bool},
+    "botScore": {"author": str, "pattern": str, "min": (int, float),
+                 "commitPattern": str},
+    "planFile": {"glob": str, "caseInsensitive": bool},
+    "prBody": {"sections": list},
+    "qa": {},
+    "draft": {},
+    "mergeable": {"maxBehind": int},
+}
+EVIDENCE = ("plan", "pr", "qa", "reviews", "diff")
+JUDGMENT_KEYS = {"id": str, "statement": str, "threshold": (int, float),
+                 "evidence": list}
+
+
+def validate_rules(rules):
+    if not isinstance(rules, dict):
+        raise ValueError("done rules must be an object")
+    unknown = set(rules) - {"version", "checks", "judgments", "judgment"}
+    if unknown:
+        raise ValueError("unknown top-level key %s" % sorted(unknown)[0])
+    if rules.get("version") != 1 or type(rules.get("version")) is not int:
+        raise ValueError("version must be 1")
+    checks = rules.get("checks", {})
+    if not isinstance(checks, dict):
+        raise ValueError("checks must be an object")
+    for name, opts in checks.items():
+        if name not in CHECK_KEYS:
+            raise ValueError("unknown check %r" % name)
+        if not isinstance(opts, dict):
+            raise ValueError("checks.%s must be an object" % name)
+        for key, value in opts.items():
+            kind = CHECK_KEYS[name].get(key)
+            if kind is None:
+                raise ValueError("unknown option checks.%s.%s" % (name, key))
+            if not isinstance(value, kind) or isinstance(value, bool) and kind != bool:
+                raise ValueError("checks.%s.%s has the wrong type" % (name, key))
+            if kind is list and not all(isinstance(v, str) for v in value):
+                raise ValueError("checks.%s.%s must list strings" % (name, key))
+    if "botScore" in checks:
+        bot = checks["botScore"]
+        for key in ("author", "pattern", "min"):
+            if key not in bot:
+                raise ValueError("checks.botScore.%s is required" % key)
+        for key in ("pattern", "commitPattern"):
+            if key not in bot:
+                continue
+            try:
+                groups = re.compile(bot[key]).groups
+            except re.error:
+                raise ValueError("checks.botScore.%s is not a valid regex" % key)
+            if groups < 1:
+                raise ValueError("checks.botScore.%s needs a capture group" % key)
+    if checks.get("mergeable", {}).get("maxBehind", 0) < 0:
+        raise ValueError("checks.mergeable.maxBehind must be 0 or more")
+    if "planFile" in checks and "glob" not in checks["planFile"]:
+        raise ValueError("checks.planFile.glob is required")
+    if "prBody" in checks and not checks["prBody"].get("sections"):
+        raise ValueError("checks.prBody.sections is required")
+    judgments = rules.get("judgments", [])
+    if not isinstance(judgments, list):
+        raise ValueError("judgments must be a list")
+    seen = set()
+    for j in judgments:
+        if not isinstance(j, dict):
+            raise ValueError("each judgment must be an object")
+        for key, value in j.items():
+            kind = JUDGMENT_KEYS.get(key)
+            if kind is None:
+                raise ValueError("unknown judgment option %r" % key)
+            if not isinstance(value, kind) or isinstance(value, bool):
+                raise ValueError("judgment %s has the wrong type" % key)
+        if not j.get("id") or not j.get("statement"):
+            raise ValueError("each judgment needs an id and a statement")
+        if not re.match(r"^[a-z0-9][a-z0-9_-]{0,47}$", j["id"]) or j["id"] in seen:
+            raise ValueError("judgment ids must be unique lowercase slugs")
+        seen.add(j["id"])
+        if not 0.0 < float(j.get("threshold", 0.5)) <= 1.0:
+            raise ValueError("judgment threshold must be in (0, 1]")
+        for source in j.get("evidence", EVIDENCE):
+            if source not in EVIDENCE:
+                raise ValueError("unknown evidence %r (use %s)"
+                                 % (source, ", ".join(EVIDENCE)))
+    if len(judgments) > 64:
+        raise ValueError("at most 64 judgments")
+    judgment = rules.get("judgment", {})
+    if not isinstance(judgment, dict):
+        raise ValueError("judgment must be an object")
+    for key, value in judgment.items():
+        if key == "onUnavailable":
+            if value not in ("escalate", "facts_only"):
+                raise ValueError("judgment.onUnavailable must be escalate or facts_only")
+        elif key == "maxStateChars":
+            if type(value) is not int or value < 1000:
+                raise ValueError("judgment.maxStateChars must be an integer >= 1000")
+        else:
+            raise ValueError("unknown option judgment.%s" % key)
+    return rules
+
+
+def load_rules(path):
+    """Owner rules from `path`, the contract defaults when it doesn't exist."""
+    if path is None:
+        path = os.path.join(os.getcwd(), ".sectorfive", "done.json")
+        if not os.path.lexists(path):
+            return DEFAULT_RULES, None
+    with open(path) as fh:
+        return validate_rules(json.load(fh)), path
+
+
+def gh(*argv):
+    try:
+        proc = subprocess.run(["gh", *argv], capture_output=True, text=True,
+                              timeout=60)
+    except FileNotFoundError:
+        raise RuntimeError("the done check reads PR facts with the gh CLI; "
+                           "install it or pass --facts")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("gh %s timed out" % argv[0])
+    if proc.returncode != 0:
+        raise RuntimeError("gh %s failed: %s" % (argv[0], proc.stderr.strip()[:300]))
+    return proc.stdout
+
+
+THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes { isResolved isOutdated
+          comments(first: 1) { nodes { author { login } body } } }
+      }
+    }
+  }
+}"""
+
+
+def gather_facts(pr, rules, issue):
+    """Read what the done check needs about one PR from GitHub via gh."""
+    view = json.loads(gh("pr", "view", str(pr), "--json",
+                         "number,title,body,isDraft,headRefOid,baseRefName,"
+                         "statusCheckRollup,reviews,url,files,commits,mergeable"))
+    repo = json.loads(gh("repo", "view", "--json", "owner,name"))
+    threads = json.loads(gh(
+        "api", "graphql", "-f", "query=" + THREADS_QUERY,
+        "-F", "owner=" + repo["owner"]["login"], "-F", "name=" + repo["name"],
+        "-F", "number=%d" % int(pr)))
+    nodes = threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+    facts = {
+        "pr": view["number"], "url": view.get("url"), "title": view.get("title") or "",
+        "body": view.get("body") or "", "isDraft": bool(view.get("isDraft")),
+        "headSha": view["headRefOid"],
+        "changedFiles": ["%s (+%s -%s)" % (f.get("path"), f.get("additions"),
+                                           f.get("deletions"))
+                         for f in view.get("files") or []],
+        "checks": [normalize_check(c) for c in view.get("statusCheckRollup") or []],
+        "headCommittedAt": ((view.get("commits") or [{}])[-1]).get("committedDate"),
+        "mergeable": view.get("mergeable"),
+        # Oldest first, so the last score found wins. Bots edit their summary
+        # comment in place, so a comment counts from its last edit.
+        "comments": sorted(
+            issue_comments(pr) +
+            [{"author": (r.get("author") or {}).get("login", ""),
+              "body": r.get("body") or "", "at": r.get("submittedAt"),
+              "commit": (r.get("commit") or {}).get("oid")}
+             for r in view.get("reviews") or []],
+            key=lambda c: c.get("at") or ""),
+        "threads": [{"resolved": t["isResolved"], "outdated": t["isOutdated"],
+                     "author": ((t["comments"]["nodes"] or [{}])[0].get("author") or {})
+                     .get("login", ""),
+                     "body": ((t["comments"]["nodes"] or [{}])[0].get("body") or "")}
+                    for t in nodes],
+    }
+    checks = rules.get("checks", {})
+    judgments = rules.get("judgments", [])
+    if "mergeable" in checks:
+        try:
+            facts["behindBy"] = int(gh(
+                "api", "repos/{owner}/{repo}/compare/%s...%s" % (
+                    view["baseRefName"], facts["headSha"]), "--jq", ".behind_by").strip())
+        except (RuntimeError, ValueError):
+            facts["behindBy"] = None  # e.g. the base branch was deleted
+    if not facts["checks"] and checks.get("ci", {}).get("docsOnly"):
+        docs_only_fallback(facts, [c["oid"] for c in view.get("commits") or []],
+                           checks["ci"]["docsOnly"])
+    if "planFile" in checks or any("plan" in j.get("evidence", EVIDENCE) for j in judgments):
+        tree = gh("api", "repos/{owner}/{repo}/git/trees/%s?recursive=1" % facts["headSha"],
+                  "--jq", ".tree[] | select(.type == \"blob\") | .path")
+        facts["files"] = [line for line in tree.splitlines() if line]
+        if "planFile" in checks:
+            match = match_plan_file(facts["files"], checks["planFile"], issue)
+            if match:
+                facts["planText"] = gh(
+                    "api", "-H", "Accept: application/vnd.github.raw",
+                    "repos/{owner}/{repo}/contents/%s?ref=%s" % (match, facts["headSha"]))
+    if any("diff" in j.get("evidence", EVIDENCE) for j in judgments):
+        facts["diff"] = gh("pr", "diff", str(pr))
+    return facts
+
+
+def issue_comments(pr):
+    out = gh("api", "--paginate", "repos/{owner}/{repo}/issues/%d/comments" % int(pr),
+             "--jq", ".[] | {author: .user.login, body: .body, at: .updated_at}")
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def commit_checks(sha):
+    runs = gh("api", "--paginate", "repos/{owner}/{repo}/commits/%s/check-runs" % sha,
+              "--jq", ".check_runs[] | {name, status, conclusion}")
+    statuses = gh("api", "repos/{owner}/{repo}/commits/%s/status" % sha,
+                  "--jq", ".statuses[] | {context, state}")
+    return [normalize_check(json.loads(line))
+            for line in (runs + "\n" + statuses).splitlines() if line.strip()]
+
+
+def docs_only_fallback(facts, commits, globs):
+    """The head has no checks. If every commit above the newest one with CI
+    touched only docs, use that commit's checks (CI often skips docs-only pushes)."""
+    skipped = 0
+    for sha in reversed(commits):
+        files = gh("api", "repos/{owner}/{repo}/commits/%s" % sha,
+                   "--jq", ".files[].filename").split()
+        if files and all(any(fnmatch.fnmatchcase(f, g) for g in globs) for f in files):
+            skipped += 1
+            continue
+        if skipped:
+            facts["checks"] = commit_checks(sha)
+            facts["checksFrom"] = {"sha": sha, "docsOnlyCommits": skipped}
+        return
+
+
+def normalize_check(check):
+    if check.get("__typename") == "StatusContext" or "context" in check:
+        state = (check.get("state") or "").upper()
+        status = ("pending" if state in ("PENDING", "EXPECTED", "") else
+                  "success" if state == "SUCCESS" else "failure")
+        return {"name": check.get("context") or "", "status": status}
+    if (check.get("status") or "").upper() != "COMPLETED":
+        status = "pending"
+    elif (check.get("conclusion") or "").upper() in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+        status = "success"
+    else:
+        status = "failure"
+    return {"name": check.get("name") or "", "status": status}
+
+
+def match_plan_file(files, opts, issue):
+    pattern = opts["glob"].replace("{issue}", issue)
+    fold = opts.get("caseInsensitive", True)
+    for path in files:
+        if fnmatch.fnmatchcase(path.lower() if fold else path,
+                               pattern.lower() if fold else pattern):
+            return path
+    return None
+
+
+def score_is_stale(comment, opts, facts):
+    """Return what the score was for when it predates the head, else None."""
+    head = facts.get("headSha") or ""
+    reviewed = None
+    if opts.get("commitPattern"):
+        found = re.search(opts["commitPattern"], comment["body"])
+        if found:
+            reviewed = found.group(1)
+    reviewed = reviewed or comment.get("commit")
+    if reviewed and head:
+        same = head.startswith(reviewed) or reviewed.startswith(head)
+        return None if same else reviewed[:12]
+    at, head_at = comment.get("at"), facts.get("headCommittedAt")
+    if at and head_at and at < head_at:
+        return "an earlier commit (scored %s)" % at
+    return None
+
+
+def fact(status, detail):
+    return {"status": status, "detail": detail}
+
+
+def evaluate_facts(rules, facts, item):
+    """Run the configured fact checks. Each result is pass, fail, or pending."""
+    checks = rules.get("checks", {})
+    results = {}
+    if "ci" in checks:
+        opts = checks["ci"]
+        ignore = set(opts.get("ignore", []))
+        allowed = set((item or {}).get("ci", {}).get("preexisting", [])) \
+            if opts.get("allowPreexisting") else set()
+        runs = [c for c in facts.get("checks", []) if c["name"] not in ignore]
+        absent = sorted(set(opts.get("required", [])) - {c["name"] for c in runs})
+        pending = [c["name"] for c in runs if c["status"] == "pending"]
+        failed = [c["name"] for c in runs
+                  if c["status"] == "failure" and c["name"] not in allowed]
+        if not runs:
+            results["ci"] = fact("pending", "no checks reported yet")
+        elif failed:
+            results["ci"] = fact("fail", "failed: " + ", ".join(sorted(failed)))
+        elif pending:
+            results["ci"] = fact("pending", "running: " + ", ".join(sorted(pending)))
+        elif absent:
+            # Every reported check finished, so a missing required one never ran.
+            results["ci"] = fact("fail", "required checks missing: " + ", ".join(absent))
+        else:
+            excused = sorted(c["name"] for c in runs if c["status"] == "failure")
+            results["ci"] = fact("pass", "%d checks passed%s" % (
+                len(runs) - len(excused),
+                "; pre-existing failures: " + ", ".join(excused) if excused else ""))
+        source = facts.get("checksFrom")
+        if source:
+            results["ci"]["detail"] += " (on %s; %d docs-only commit(s) above had no CI)" % (
+                source["sha"][:12], source["docsOnlyCommits"])
+    if "reviewThreads" in checks:
+        skip_outdated = checks["reviewThreads"].get("ignoreOutdated", False)
+        open_threads = [t for t in facts.get("threads", [])
+                        if not t["resolved"] and not (skip_outdated and t["outdated"])]
+        results["reviewThreads"] = fact(
+            "fail" if open_threads else "pass",
+            "%d unresolved" % len(open_threads) if open_threads else
+            "%d threads, all resolved" % len(facts.get("threads", [])))
+    if "botScore" in checks:
+        opts = checks["botScore"]
+        pattern = re.compile(opts["pattern"])
+        score = scored = None
+        for comment in facts.get("comments", []):
+            if opts["author"].lower() in comment["author"].lower():
+                found = pattern.search(comment["body"])
+                if found:
+                    try:
+                        score, scored = float(found.group(1)), comment
+                    except ValueError:
+                        pass
+        stale = score is not None and score_is_stale(scored, opts, facts)
+        if score is None:
+            results["botScore"] = fact("pending", "no %s score posted" % opts["author"])
+        elif stale:
+            # A new push resets the review: wait for the bot to score this head.
+            results["botScore"] = fact("pending", "score %g is for %s, head is %s" % (
+                score, stale, (facts.get("headSha") or "?")[:12]))
+        else:
+            results["botScore"] = fact(
+                "pass" if score >= opts["min"] else "fail",
+                "score %g (min %g)" % (score, opts["min"]))
+    if "planFile" in checks:
+        issue = (item or {}).get("issue") or facts.get("issue", "")
+        match = match_plan_file(facts.get("files", []), checks["planFile"], issue)
+        results["planFile"] = fact("pass", match) if match else fact(
+            "fail", "no file matches %s on the head commit"
+            % checks["planFile"]["glob"].replace("{issue}", issue))
+    if "prBody" in checks:
+        body = facts.get("body", "")
+        missing = [name for name in checks["prBody"]["sections"]
+                   if not re.search(r"(?im)^\s*(?:#{1,6}\s*|\*\*)?\s*" + re.escape(name)
+                                    + r"\b", body)]
+        results["prBody"] = fact("fail", "missing: " + ", ".join(missing)) if missing \
+            else fact("pass", "all %d sections present" % len(checks["prBody"]["sections"]))
+    if "qa" in checks:
+        qa = (item or {}).get("qa") or {}
+        if qa.get("verdict") != "approve":
+            results["qa"] = fact("fail", "no qa approve recorded")
+        elif qa.get("sha") != facts.get("headSha"):
+            results["qa"] = fact("fail", "qa approved %s, head is %s" % (
+                (qa.get("sha") or "?")[:12], (facts.get("headSha") or "?")[:12]))
+        else:
+            results["qa"] = fact("pass", "approve on head")
+    if "mergeable" in checks:
+        state = (facts.get("mergeable") or "UNKNOWN").upper()
+        behind = facts.get("behindBy")
+        limit = checks["mergeable"].get("maxBehind")
+        if state == "CONFLICTING":
+            results["mergeable"] = fact("fail", "conflicts with the base branch")
+        elif state != "MERGEABLE":
+            results["mergeable"] = fact("pending", "GitHub is still computing mergeability")
+        elif limit is not None and behind is None:
+            results["mergeable"] = fact("pending", "could not compare with the base branch")
+        elif limit is not None and behind > limit:
+            results["mergeable"] = fact("fail", "%d commits behind base (max %d): merge "
+                                        "the base in and let CI run again" % (behind, limit))
+        else:
+            results["mergeable"] = fact("pass", "no conflicts" + (
+                "; %d commits behind base" % behind if behind else ""))
+    if "draft" in checks:
+        results["draft"] = fact("fail", "PR is a draft") if facts.get("isDraft") \
+            else fact("pass", "ready for review")
+    return results
+
+
+def judgment_state(issue, facts, item, sources, limit):
+    parts = ["Work item: %s" % issue]
+    if "plan" in sources:
+        plan = facts.get("planText")
+        local = (item or {}).get("plan")
+        if not plan and local and os.path.isfile(local):
+            with open(local) as fh:
+                plan = fh.read()
+        if plan:
+            parts.append("--- plan ---\n" + plan)
+    if "pr" in sources:
+        parts.append("--- pull request ---\n%s\n\n%s" % (facts.get("title", ""),
+                                                        facts.get("body", "")))
+    if "qa" in sources:
+        report = ((item or {}).get("qa") or {}).get("report")
+        if report and os.path.isfile(report):
+            with open(report) as fh:
+                parts.append("--- qa report ---\n" + fh.read())
+    if "reviews" in sources:
+        notes = [t["author"] + ": " + t["body"] for t in facts.get("threads", [])]
+        notes += [c["author"] + ": " + c["body"] for c in facts.get("comments", [])]
+        if notes:
+            parts.append("--- review comments ---\n" + "\n\n".join(notes))
+    if "diff" in sources and facts.get("changedFiles"):
+        parts.append("--- changed files ---\n" + "\n".join(facts["changedFiles"]))
+    state = "\n\n".join(parts)
+    if len(state) > limit:
+        return state[:limit] + "\n[truncated]"
+    if "diff" in sources and facts.get("diff"):
+        state += "\n\n--- diff ---\n" + fit_diff(facts["diff"], limit - len(state) - 20)
+    return state
+
+
+def fit_diff(diff, budget):
+    """Trim a diff to `budget` chars, giving every file a fair share so the
+    files late in the diff (often the tests) are never cut off entirely."""
+    if len(diff) <= budget:
+        return diff
+    chunks = re.split(r"(?m)^(?=diff --git )", diff)
+    chunks = [c for c in chunks if c]
+    if budget <= 0 or not chunks:
+        return "[diff omitted: no room left in the state]"
+    sizes = {i: len(c) for i, c in enumerate(chunks)}
+    remaining = budget
+    # Small files keep everything; the leftover is split among the large ones.
+    order = sorted(sizes, key=sizes.get)
+    caps = {}
+    for n, i in enumerate(order):
+        share = remaining // (len(order) - n)
+        caps[i] = min(sizes[i], share)
+        remaining -= caps[i]
+    out = []
+    for i, chunk in enumerate(chunks):
+        if caps[i] < len(chunk):
+            out.append(chunk[:max(caps[i] - 12, 0)] + "\n[trimmed]\n")
+        else:
+            out.append(chunk)
+    return "".join(out)
+
+
+def cmd_done(args):
+    try:
+        rules, rules_path = load_rules(args.rules)
+    except (OSError, ValueError) as exc:
+        message = str(exc) if isinstance(exc, ValueError) and not isinstance(
+            exc, json.JSONDecodeError) else "unreadable or not JSON"
+        print("dispatch: error: invalid done.json: %s" % message, file=sys.stderr)
+        return 6
+    if not ISSUE_RE.match(args.issue):
+        raise RuntimeError("invalid issue key %r" % args.issue)
+    item = None
+    try:
+        item = load_work(args.issue)
+    except RuntimeError:
+        if args.pr is None and args.facts is None:
+            raise
+    pr = args.pr if args.pr is not None else (item or {}).get("pr")
+    if args.facts is not None:
+        with open(args.facts) as fh:
+            facts = json.load(fh)
+    elif pr is None:
+        raise RuntimeError("no PR for %s (pass --pr or work set pr=<n>)" % args.issue)
+    else:
+        facts = gather_facts(pr, rules, args.issue)
+    facts.setdefault("issue", args.issue)
+    results = evaluate_facts(rules, facts, item)
+    statuses = {r["status"] for r in results.values()}
+    judged = {}
+    if "fail" in statuses:
+        verdict = "not_done"
+    elif "pending" in statuses:
+        verdict = "pending"
+    elif not rules.get("judgments"):
+        verdict = "done"
+    else:
+        settings = rules.get("judgment", {})
+        limit = settings.get("maxStateChars", 16000)
+        questions = {}
+        for j in rules["judgments"]:
+            questions[j["id"]] = {"type": "noul", "instructions": j["statement"]}
+        # One state per distinct evidence set keeps each statement on what it asked for.
+        groups = {}
+        for j in rules["judgments"]:
+            groups.setdefault(tuple(j.get("evidence", EVIDENCE)), []).append(j)
+        provider = None
+        try:
+            for sources, members in groups.items():
+                state = judgment_state(args.issue, facts, item, sources, limit)
+                provider, answers = ask(
+                    state, {j["id"]: questions[j["id"]] for j in members},
+                    args.provider, args.timeout)
+                for j in members:
+                    value = float(answers[j["id"]].get("noul", 0.0))
+                    threshold = float(j.get("threshold", 0.5))
+                    judged[j["id"]] = {"noul": value, "threshold": threshold,
+                                       "blocked": value >= threshold}
+            verdict = "blocked" if any(v["blocked"] for v in judged.values()) else "done"
+        except (RuntimeError, KeyError, ValueError, TypeError) as exc:
+            if settings.get("onUnavailable", "escalate") == "facts_only":
+                verdict = "done"
+                judged = {"skipped": "dispatcher unavailable: %s" % str(exc)[:200]}
+            else:
+                verdict = "escalate"
+                judged = {"error": "dispatcher unavailable: %s" % str(exc)[:200]}
+    threads = facts.get("threads", [])
+    authors = {}
+    for t in threads:
+        authors[t["author"]] = authors.get(t["author"], 0) + 1
+    decision = {
+        "kind": "done", "issue": args.issue, "pr": facts.get("pr", pr),
+        "head_sha": facts.get("headSha"), "rules": rules_path or "defaults",
+        "verdict": verdict, "facts": results, "judgments": judged,
+        "threads": {"total": len(threads), "by_author": authors},
+    }
+    if not args.no_log:
+        append_log(dict(decision))
+    if item is not None:
+        item["done"] = {"verdict": verdict, "sha": facts.get("headSha"), "ts": now(),
+                        "facts": results, "judgments": judged,
+                        "threads": decision["threads"]}
+        save_work(item)
+    if args.format == "json":
+        print(json.dumps(decision, indent=2))
+    else:
+        print("rules: %s" % decision["rules"])
+        for name, r in results.items():
+            print("%-18s %-7s %s" % (name, r["status"].upper(), r["detail"]))
+        for name, j in judged.items():
+            if isinstance(j, dict):
+                print("%-18s %-7s noul %.3f (threshold %.2f)" % (
+                    name, "BLOCKED" if j["blocked"] else "PASS", j["noul"], j["threshold"]))
+            else:
+                print("%-18s %s" % (name, j))
+        print("verdict: %s" % verdict.upper())
+    return {"done": 0, "escalate": 3, "pending": 7}.get(verdict, 4)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     common = argparse.ArgumentParser(add_help=False)
@@ -375,6 +1169,8 @@ def build_parser():
                            help="route a task to a role + tier")
     route.add_argument("--task", required=True, help="task text (the state)")
     route.add_argument("--plan", help="optional plan file appended to the state")
+    route.add_argument("--issue", help="work item key, logged so work advance can "
+                                       "confirm the step was routed")
     route.add_argument("--min-confidence", type=float, default=0.60)
     route.add_argument("--expect", choices=sorted(ROLES),
                        help="planned role from ownership; a different pick escalates "
@@ -392,14 +1188,41 @@ def build_parser():
     check.add_argument("--provider", choices=["auto", "jev", "clef"],
                        help="decision provider (default: config provider or auto)")
     check.add_argument("--config", help="config path (default: .sectorfive/config.json)")
+    check.add_argument("--rules", help="done rules path (default: .sectorfive/done.json)")
     check.set_defaults(func=cmd_check)
     unrouted = sub.add_parser("unrouted", help="record a step assigned without dispatch")
     unrouted.add_argument("--task", required=True, help="task text (the state)")
     unrouted.add_argument("--reason", help="reason dispatch was unavailable")
+    unrouted.add_argument("--issue", help="work item key")
     unrouted.add_argument("--format", choices=["text", "json"], default="text")
     unrouted.add_argument("--no-log", action="store_true",
                           help="do not append to .sectorfive/dispatch-log.jsonl")
     unrouted.set_defaults(func=cmd_unrouted)
+    done = sub.add_parser("done", parents=[common],
+                          help="check a work item against the repo's done rules")
+    done.add_argument("--issue", required=True, help="work item key, e.g. ENG-123")
+    done.add_argument("--pr", type=int, help="PR number (default: the work item's)")
+    done.add_argument("--rules", help="rules path (default: .sectorfive/done.json, "
+                                      "else the contract defaults)")
+    done.add_argument("--facts", help="read PR facts from this JSON file instead of gh")
+    done.set_defaults(func=cmd_done)
+    work = sub.add_parser("work", help="per-issue work item state")
+    work_sub = work.add_subparsers(dest="action", required=True)
+    w_new = work_sub.add_parser("new", help="create a work item in phase planned")
+    w_new.add_argument("--issue", required=True)
+    w_new.add_argument("--plan", help="durable plan path")
+    w_set = work_sub.add_parser("set", help="record fields: owner, branch, pr, plan, "
+                                            "qa.verdict, qa.sha, qa.report, ci.preexisting")
+    w_set.add_argument("--issue", required=True)
+    w_set.add_argument("pairs", nargs="+", metavar="field=value")
+    w_adv = work_sub.add_parser("advance", help="move to a phase if its requirements hold")
+    w_adv.add_argument("--issue", required=True)
+    w_adv.add_argument("--to", required=True, choices=PHASES + ["blocked"])
+    w_adv.add_argument("--note", help="reason or context (required for blocked)")
+    w_show = work_sub.add_parser("show", help="list work items, or show one")
+    w_show.add_argument("--issue")
+    w_show.add_argument("--format", choices=["text", "json"], default="text")
+    work.set_defaults(func=cmd_work)
     return parser
 
 

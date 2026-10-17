@@ -89,7 +89,8 @@ covers key setup.
 
 ## Session startup (planning)
 
-Read config, run `python3 tools/dispatch.py check`, then open with one line:
+Read config, run `python3 tools/dispatch.py check` (it also validates
+`done.json`) and `python3 tools/dispatch.py work show`, then open with one line:
 `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi`.
 Under `pending`, ask for credentials again. State any mode change explicitly.
 
@@ -132,8 +133,28 @@ planning owns delivery. It pushes only after qa approves, opens the PR, and
 publishes qa's evidence by pushing it to the orphan `sectorfive-evidence` branch,
 embedding commit-pinned `?raw=true` links in the PR description. (GitHub has no
 attachment upload API.) It also watches checks, routes bot findings to the
-owning role, and logs a `closeout`. The user merges. See the contract's
-Delivery section.
+owning role, and watches the PR with `dispatch.py done` until it returns
+`done` or `not_done`. The user merges. See the contract's Delivery section.
+
+## Work items and the done check
+
+Each issue in flight has a state file, `.sectorfive/work/<issue>.json`:
+
+- `dispatch.py work new --issue <key> --plan <path>` creates it in `planned`.
+- `work set --issue <key> owner=frontend branch=... pr=...` records fields;
+  qa records `qa.verdict=approve qa.sha=<head sha> qa.report=<path>`.
+- `work advance --issue <key> --to <phase>` moves planned → building → review →
+  open → done → merged, one phase at a time, and refuses with the reason when a
+  requirement is missing (owner, a routed step, branch, PR, qa approve on a SHA,
+  a passing done check). `blocked` needs `--note`; moving back is always allowed.
+- `work show` lists every item and its phase.
+
+`dispatch.py done --issue <key>` decides whether the PR is ready for the user.
+Fact checks (CI, review threads, bot score for the head commit, mergeability,
+plan file, PR body sections, qa approve on head, draft) come from GitHub via `gh`; then the dispatcher scores
+the repo's judgment statements. Exit 0 done, 4 not done or blocked, 7 pending
+(re-run later), 3 escalate. The rules are owner-configured in
+`.sectorfive/done.json`; `docs/runbook.md` documents every option.
 
 ## Dispatcher (decision models)
 
@@ -150,6 +171,8 @@ so config and logs use that repo's `.sectorfive/`:
   one of two role rules (tests belong to qa; qa never edits product code).
   Below that it is a `mismatch` (exit 3): resolve it from the contract's role
   definitions or ask the user.
+- Pass `--issue <key>` on `route` and `unrouted` so `work advance` can confirm
+  the step was dispatched.
 - Yes/no gate: `python3 tools/dispatch.py gate --state "..." --statement "..."`.
   Exit 0 proceeds; exit 4 blocks until planning rules.
 - Keys come from `TYPESAFE_API_KEY` (Jev) and `CLOUDFLARE_ACCOUNT_ID` /
