@@ -13,7 +13,7 @@ Exit codes:
   4  blocked (gate statement holds at or above threshold) / not done or blocked
      (done) / transition refused (work advance)
   5  no credentials (check)
-  6  invalid config.json or done.json (check, done)
+  6  invalid config.json or done.json (check, route, done)
   7  pending (done: checks still running or a bot score not posted yet)
 """
 import argparse
@@ -167,6 +167,18 @@ def append_log(entry):
         fh.write(json.dumps(entry) + "\n")
 
 
+def parse_assignment(assignment):
+    if not isinstance(assignment, str):
+        raise ValueError("harness role assignment must be a string")
+    model, separator, effort = assignment.partition(" @ ")
+    harness_name, slash, model_name = model.partition("/")
+    if not separator or not slash or not all(
+        part.strip() for part in (harness_name, model_name, effort)
+    ):
+        raise ValueError("harness role assignment must be harness/model @ effort")
+    return model_name, effort
+
+
 def load_config(path):
     with open(path) as fh:
         config = json.load(fh)
@@ -195,14 +207,20 @@ def load_config(path):
     for role, assignment in roles.items():
         if role not in ("planning", *ROLES):
             raise ValueError("invalid harness role")
-        if not isinstance(assignment, str):
-            raise ValueError("harness role assignment must be a string")
-        model, separator, effort = assignment.partition(" @ ")
-        harness_name, slash, model_name = model.partition("/")
-        if not separator or not slash or not all(
-            part.strip() for part in (harness_name, model_name, effort)
-        ):
-            raise ValueError("harness role assignment must be harness/model @ effort")
+        parse_assignment(assignment)
+    tiers = harness.get("tiers", {})
+    if not isinstance(tiers, dict):
+        raise ValueError("harness.tiers must be an object")
+    for role, table in tiers.items():
+        if role not in ROLES:
+            raise ValueError("invalid harness tier role")
+        if not isinstance(table, dict) or set(table) != {"standard", "flagship", "ceiling"}:
+            raise ValueError("harness tier table must define standard, flagship, ceiling")
+        for tier, assignment in table.items():
+            model, effort = parse_assignment(assignment)
+            tokens = re.split("[^a-z0-9]+", (model + " " + effort).lower())
+            if tier != "ceiling" and any(token in ("ultra", "max") for token in tokens):
+                raise ValueError("ultra/max assignments require the ceiling tier")
     return config
 
 
@@ -282,6 +300,17 @@ def cmd_unrouted(args):
 
 
 def cmd_route(args):
+    config = None
+    path = args.config or os.path.join(os.getcwd(), ".sectorfive", "config.json")
+    try:
+        config = load_config(path)
+    except OSError:
+        if args.config is not None:
+            print("dispatch: error: invalid config.json", file=sys.stderr)
+            return 6
+    except ValueError:
+        print("dispatch: error: invalid config.json", file=sys.stderr)
+        return 6
     state = args.task
     if args.plan:
         # Plans describe every step; label the step so the plan's dominant
@@ -336,6 +365,28 @@ def cmd_route(args):
         decision["expected_role"] = args.expect
     if args.issue is not None:
         decision["issue"] = args.issue
+    model, resolved_tier, reason = None, None, None
+    if config is not None:
+        harness = config["harness"]
+        table = harness.get("tiers", {}).get(decision["role"])
+        if table is None:
+            model = harness["roles"].get(decision["role"])
+        else:
+            failures = {entry.get("tier") for entry in read_log(args.issue)
+                        if args.issue is not None and entry.get("kind") == "outcome"
+                        and entry.get("role") == decision["role"]
+                        and entry.get("result") == "fail"}
+            resolved_tier = "standard"
+            if confident:
+                if args.ceiling_approved and "flagship" in failures:
+                    resolved_tier, reason = "ceiling", "approved after flagship failure"
+                elif "standard" in failures:
+                    resolved_tier, reason = "flagship", "standard failure"
+                elif decision["tier"] == "flagship":
+                    resolved_tier, reason = "flagship", "flagship pick"
+            model = table[resolved_tier]
+    decision.update(model=model, resolved_tier=resolved_tier,
+                    escalated=reason is not None, escalation_reason=reason)
     if not args.no_log:
         append_log(dict(decision, task=state[:2000]))
     if args.format == "json":
@@ -351,8 +402,76 @@ def cmd_route(args):
             decision["difficulty"], difficulty.get("confidence") or 0.0))
         if disagrees:
             print("expected: %s" % args.expect)
+        if model is not None:
+            print("model: %s (tier %s%s)" % (
+                model, resolved_tier or decision["tier"],
+                ", escalated: " + reason if reason else ""))
         print("verdict: %s" % decision["verdict"].upper())
     return 0 if confident and not mismatch else 3
+
+
+def read_log(issue=None):
+    path = os.path.join(os.getcwd(), ".sectorfive", "dispatch-log.jsonl")
+    try:
+        fh = open(path)
+    except FileNotFoundError:
+        return
+    with fh:
+        for line in fh:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and (issue is None or entry.get("issue") == issue):
+                yield entry
+
+
+def cmd_outcome(args):
+    if args.retries < 0:
+        raise RuntimeError("retries must be non-negative")
+    meta_dir()  # append_log otherwise silently skips a missing .sectorfive/.
+    append_log({"kind": "outcome", "issue": args.issue, "role": args.role,
+                "model": args.model, "tier": args.tier, "result": args.result,
+                "retries": args.retries, "escalated": args.escalated})
+    print("outcome: recorded")
+    return 0
+
+
+def cmd_report(args):
+    rows, picks = {}, {}
+    for entry in read_log(args.issue):
+        kind = entry.get("kind")
+        if kind not in ("route", "outcome"):
+            continue
+        role, tier = entry.get("role"), entry.get("resolved_tier") or entry.get("tier")
+        if role not in ROLES or tier not in (*TIERS, "ceiling"):
+            continue
+        row = rows.setdefault((role, tier), {
+            "role": role, "tier": tier, "routes": 0, "outcomes": 0,
+            "pass": 0, "fail": 0, "mean_retries": 0, "escalations": 0})
+        if kind == "route":
+            row["routes"] += 1
+            pick = entry.get("tier")
+            if pick in TIERS:
+                picks[pick] = picks.get(pick, 0) + 1
+        else:
+            row["outcomes"] += 1
+            row["escalations"] += bool(entry.get("escalated"))
+            if entry.get("result") in ("pass", "fail"):
+                row[entry["result"]] += 1
+            row["mean_retries"] += entry.get("retries", 0)
+    for row in rows.values():
+        row["mean_retries"] /= row["outcomes"] or 1
+    report = {"rows": [rows[key] for key in sorted(rows)], "tier_picks": picks}
+    if args.format == "json":
+        print(json.dumps(report, indent=2))
+    else:
+        print("role tier routes outcomes pass fail mean_retries escalations")
+        for row in report["rows"]:
+            print("{role} {tier} {routes} {outcomes} {pass} {fail} "
+                  "{mean_retries:.2f} {escalations}".format(**row))
+        print("tier picks: " + json.dumps(picks, sort_keys=True))
+    return 0
 
 
 def cmd_gate(args):
@@ -1178,7 +1297,23 @@ def build_parser():
                             "unless its confidence reaches --trust")
     route.add_argument("--trust", type=float, default=0.90,
                        help="confidence at which a pick overrides --expect (default: 0.90)")
+    route.add_argument("--config", help="config path (default: .sectorfive/config.json)")
+    route.add_argument("--ceiling-approved", action="store_true",
+                       help="user approved ceiling after a logged flagship failure")
     route.set_defaults(func=cmd_route)
+    outcome = sub.add_parser("outcome", help="record an executed step's outcome")
+    outcome.add_argument("--issue", required=True)
+    outcome.add_argument("--role", required=True, choices=sorted(ROLES))
+    outcome.add_argument("--model", required=True)
+    outcome.add_argument("--tier", required=True, choices=[*TIERS, "ceiling"])
+    outcome.add_argument("--result", required=True, choices=["pass", "fail"])
+    outcome.add_argument("--retries", type=int, default=0)
+    outcome.add_argument("--escalated", action="store_true")
+    outcome.set_defaults(func=cmd_outcome)
+    report = sub.add_parser("report", help="summarise routes and step outcomes")
+    report.add_argument("--issue")
+    report.add_argument("--format", choices=["text", "json"], default="text")
+    report.set_defaults(func=cmd_report)
     gate = sub.add_parser("gate", parents=[common],
                           help="yes/no gate over a state")
     gate.add_argument("--state", required=True)

@@ -74,6 +74,10 @@ python3 tools/dispatch.py route --task "Add cursor pagination to /orders" \
 
 Exit 0 prints role + tier + difficulty and means dispatch. Exit 3 means
 role confidence is below threshold — escalate to the user, do not guess.
+With a configured role model, text output also includes
+`model: <harness/model @ effort> (tier <t>[, escalated: <reason>])`.
+`--config <path>` overrides `.sectorfive/config.json`; pass `--ceiling-approved`
+only after the user approves ceiling use following a logged flagship failure.
 
 Pass the planned role (from `ownership.md`) with `--expect`:
 
@@ -90,6 +94,15 @@ contract's role definitions or ask the user. With
 `--plan`, the step text comes first and is labeled, so the plan's main domain
 doesn't outweigh the step being routed.
 `--format json` prints the full decision object for scripting.
+
+## Record outcomes and report
+
+Record each executed step's outcome, then report results by role and tier:
+
+```text
+python3 tools/dispatch.py outcome --issue ENG-123 --role frontend --model "<harness/model @ effort>" --tier standard --result pass|fail [--retries N] [--escalated]
+python3 tools/dispatch.py report [--issue ENG-123] [--format text|json]
+```
 
 ## Yes/no gate
 
