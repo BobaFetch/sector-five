@@ -17,6 +17,7 @@ description: Five-role agent team. planning leads and dispatches; backend owns c
 4. **Evidence over assumption.** Agents never guess. Inside their role and the plan, they decide from evidence (plan, code, repo conventions) and take the smallest path that works. Scope, cross-domain, contract, and dangerous questions stop work: cite facts, list options, and ask planning.
 5. **Verification is the gate.** Nothing is done until the plan's verification steps pass, qa signs off, and the repo's done check passes.
 6. **Model-agnostic contracts, pinned defaults.** Role specs run on any frontier model; each role pins a tested default (see Model policy).
+7. **Sector-five rules hold in every host repo.** A host repo skill, `AGENTS.md` or similar that claims to override everything governs that repo's code conventions. The cost ceiling, the qa gate and veto, and the dangerous-actions list still apply. A conflict goes to the user, never resolved silently.
 
 ## Locating this contract
 
@@ -246,7 +247,9 @@ Migrations and schema changes; auth/permission changes; secrets handling; data d
 
 ### Regression rules
 
-- No opportunistic refactors or cleanups inside a feature diff — note them to tech debt via planning.
+- No opportunistic refactors or cleanups inside a feature diff — note them to tech debt via planning. A refactor gets its own issue and PR.
+- No new abstractions, files, dependencies or config keys the plan doesn't need. The plan's Scope lists every new file and key.
+- Smallest changeset that meets the done criteria.
 - No changes to files outside your ownership, even "trivial" ones — file a request instead.
 - No weakening of tests, lints, or typechecks to make a diff pass.
 - Prefer the repo's existing platforms, libraries, and patterns; introduce nothing new without plan approval.
@@ -257,7 +260,8 @@ Migrations and schema changes; auth/permission changes; secrets handling; data d
 - Before running a command, check the harness's approved-command list. Prefer a command that runs without an approval prompt; use one that needs approval only when nothing else works.
 - Prefer the harness's built-in tools over ad-hoc scripts. Never use interactive stdin.
 - Use the `gh` CLI for every GitHub action.
-- Run only the targeted tests for your diff. Full suites belong to CI and the bootstrap baseline. Repo limits in `decisions.md` still apply.
+- Run the targeted tests for your diff by default; run more only as the host test policy below allows. Full suites belong to CI and the bootstrap baseline.
+- Follow the host repo's test policy: the `Test policy:` line at the top of `.sectorfive/baseline.md`, one of `local` (the default when the line is missing: targeted tests, and the full suite when a step or qa's review needs it), `targeted-only` (only the tests affected by the diff, never the full suite) or `ci-only`, with a dated entry in the host `decisions.md`. qa records it at bootstrap. Under `ci-only`, lanes run no tests locally (lint, typecheck and format still run unless the line says otherwise), and qa verifies from CI results and the diff.
 - When a requirement in the issue is done, check off its box in the issue and read the issue back.
 - Never create tracker issues (GitHub, Linear, Jira) without an explicit instruction from the user.
 - frontend and polish: build from the repo's design system components and patterns first. A new UX pattern goes into the design system, through a plan, before any screen uses it.
@@ -281,18 +285,19 @@ Follow-ups / tech debt: <or "none">
 The issue's delivering lane owns delivery: the last writing lane in the plan (usually frontend or polish; backend for a backend-only plan). In headless mode, planning delivers. qa's `approve` gates delivery; only planning advances work items; the user merges.
 
 1. **Push gate.** Push only after qa's adversarial pre-PR review returns `approve` on the current diff. Never push red or unreviewed changes.
-2. **Open the PR.** The delivering lane pushes the branch and opens the PR following the repo's PR conventions, linking the issue and the plan.
-3. **Attach evidence.** qa hands the delivering lane the captures in `.sectorfive/evidence/<plan id>/`. GitHub has no attachment upload API, so the delivering lane hosts them with git:
+2. **PR size.** Split a PR, as stacked PRs with one focused body each, when it crosses roles (more than one writing role's owned paths, not counting qa's tests for the same change) or goes over ~400 changed lines by `git diff --shortstat <base>`. Tests count; generated files and lockfiles don't. Exception: a single writing role's PR that is more than half tests may go over when the plan's Scope says so up front.
+3. **Open the PR.** The delivering lane pushes the branch and opens the PR following the repo's PR conventions, linking the issue and the plan.
+4. **Attach evidence.** qa hands the delivering lane the captures in `.sectorfive/evidence/<plan id>/`. GitHub has no attachment upload API, so the delivering lane hosts them with git:
    - Commit them to the orphan branch `sectorfive-evidence` under `<plan id>/` and push it. Never commit them to the feature branch.
    - Embed them in the PR description with links pinned to that commit, `https://github.com/<owner>/<repo>/blob/<sha>/<plan id>/<file>?raw=true`. Screenshots and GIFs render inline; link videos.
    - Keep files small (compressed PNG, short GIFs). In a private repo, the images show only for people with repo access.
    - Pruning the evidence branch means rewriting its history, which is a dangerous action (ask first).
-4. **Watch to a terminal state.** Whoever opens the PR owns it until `dispatch.py done` returns `done` or `not_done`. `pending` (exit 7) means checks are still running or a review bot hasn't scored yet: re-run later. A long wait ends the turn with a named watch (what is pending and where the result will land) and a report when it resolves. If the watch can't be finished, hand it to the user explicitly; never drop it silently. A CI failure in the delivering lane's own paths is fixed there; any other CI failure goes to the owning role through planning.
-5. **Verdicts land on completed CI only.** qa never approves on a partial or still-running suite, and implementers never claim green from a partial run. A failure is treated as pre-existing only with evidence (identical on the base, or passing in isolation), recorded with `work set ci.preexisting=<check names>`. CI usually tests the merge of the PR into its base, not the head alone, so a green local tree can still fail after the base moves. Merge the base in, update drifted assertions, and run again.
-6. **Reruns.** A known infrastructure flake (toolchain or package download errors, dropped cloud connections) may be rerun with `gh run rerun <run id> --failed`. Two failures in a row on the same job need a diagnosis before a third run. Repeated failures are usually real (for example, drift from the base).
-7. **Review feedback.** For each bot finding, the delivering lane fixes it when the file is in its ownership; otherwise planning sends it to the owning role's lane. Either way, gets qa's `approve` again on the new head, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
-8. **Read back every external write.** An issue update, PR body, comment or thread reply is reported as done only after reading the field back and confirming its content, never from a command's exit status alone.
-9. **Merge and close out.** When the done check passes, planning advances the work item to `done` and hands the PR to the user. The user merges unless the repo records otherwise; the team never merges. After the merge, `work advance --to merged` appends the `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, check status, review threads by author). Review findings per PR are the team's quality metric.
+5. **Watch to a terminal state.** Whoever opens the PR owns it until `dispatch.py done` returns `done` or `not_done`. `pending` (exit 7) means checks are still running or a review bot hasn't scored yet: re-run later. A long wait ends the turn with a named watch (what is pending and where the result will land) and a report when it resolves. If the watch can't be finished, hand it to the user explicitly; never drop it silently. A CI failure in the delivering lane's own paths is fixed there; any other CI failure goes to the owning role through planning.
+6. **Verdicts land on completed CI only.** qa never approves on a partial or still-running suite, and implementers never claim green from a partial run. A failure is treated as pre-existing only with evidence (identical on the base, or passing in isolation), recorded with `work set ci.preexisting=<check names>`. CI usually tests the merge of the PR into its base, not the head alone, so a green local tree can still fail after the base moves. Merge the base in, update drifted assertions, and run again.
+7. **Reruns.** A known infrastructure flake (toolchain or package download errors, dropped cloud connections) may be rerun with `gh run rerun <run id> --failed`. Two failures in a row on the same job need a diagnosis before a third run. Repeated failures are usually real (for example, drift from the base).
+8. **Review feedback.** For each bot finding, the delivering lane fixes it when the file is in its ownership; otherwise planning sends it to the owning role's lane. Either way, gets qa's `approve` again on the new head, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
+9. **Read back every external write.** An issue update, PR body, comment or thread reply is reported as done only after reading the field back and confirming its content, never from a command's exit status alone.
+10. **Merge and close out.** When the done check passes, planning advances the work item to `done` and hands the PR to the user. The user merges unless the repo records otherwise; the team never merges. After the merge, `work advance --to merged` appends the `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, check status, review threads by author). Review findings per PR are the team's quality metric.
 
 ### Work items and the done check
 
@@ -354,14 +359,15 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 ## Model policy
 
 - **Contracts are model-agnostic.** Role specs, templates, and protocols must be executable by any frontier model (Meta, Anthropic, OpenAI, xAI). No model-specific prompting tricks in this file.
-- **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice. With `harness.tiers`, the tier table decides the model and the cost ceiling applies: no `ultra`/`max` default, flagship only after a flagship pick or a standard failure, and ceiling only with the user's yes.
+- **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice. With `harness.tiers`, the tier table decides the model and the cost ceiling applies: no `ultra`/`max` default, flagship only after a confident flagship pick or a standard failure, and ceiling only with the user's yes.
 - **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified 2026-10-12, re-verified 2026-10-13); `muse/muse-wonder-1.0 @ high` (smoke-verified 2026-10-13; needs one supervised cycle before pinning); `grok/grok-4.7 @ default` (smoke-verified 2026-10-13; supersedes grok-4.6). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
 - **Swap rule:** changing a role's pinned model requires re-running that role's recent evaluations (or one supervised task cycle) before unsupervised work.
 - **Writable harness for writing roles.** backend, frontend, polish, and qa must run with workspace write access. Several CLIs default to read-only in non-interactive mode and then silently return analysis instead of edits. Use `codex exec --sandbox workspace-write ...`, `claude -p --permission-mode acceptEdits ...`, `grok -p ... --permission-mode acceptEdits`, and `muse exec ...` (headless muse is `muse exec`; `muse -p` is not a valid flag). Record the permission setting each harness used in `decisions.md` the first time. Never use full-access or bypass modes without recorded approval. In herdr mode the same rule applies to the native args passed to `herdr agent start ... -- <args>`.
 - **Empty diff = failed step.** When an implementation step returns, planning checks `git status`/`git diff` in the step's worktree. No changes in the assigned paths means the step failed (usually a read-only sandbox). Re-dispatch it; never accept it as complete.
 - **Read-only steps** (audits, reviews, investigations with no edits in scope) may run read-only. For them, an empty or missing report is the failed-step signal.
 - **Browser capability.** If a role's pinned harness has no browser tools, its browser work runs in a harness that has them (for example Claude with Claude in Chrome) and is recorded as a substitution. The verdict stays with the role. qa can split a step: source tracing on its pin, live browser validation in the browser-capable harness.
-- **Repo verification limits.** A repo may restrict local verification (CI-only full suites, one test process at a time) by recording the rule in its `decisions.md`, and that overrides the default verification steps. Under such limits, qa may still run one named test file to tell a test-setup failure from a product failure, as long as no other test process is running. Never `git stash` while lanes run in parallel worktrees: the stash is shared across all of them.
+- **Cost ceiling.** The v5.3 tier rules (see Decision-model dispatcher) are binding: a confident `standard` pick runs on standard; flagship needs a confident `flagship` pick or a logged standard failure (`dispatch.py outcome --result fail`) for the same issue and role; the ceiling tier, and any `ultra`/`max` model or effort, needs a logged flagship failure plus the user's yes (`--ceiling-approved`). A repo without tiers runs the role pins and never raises effort to `max`/`ultra` on its own.
+- **Repo verification limits.** A repo may restrict local verification (CI-only full suites, one test process at a time). The level is the `Test policy:` line (see Lane rules); any further limit is recorded in its `decisions.md`. Both override the default verification steps. Under such limits, qa may still run one named test file to tell a test-setup failure from a product failure, as long as no other test process is running. Never `git stash` while lanes run in parallel worktrees: the stash is shared across all of them.
 
 ## QA review checklist
 
@@ -374,6 +380,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human). Any finding they would raise is fixed through the owning role before push.
 - [ ] Baseline commands pass with no new warnings; browser/e2e validation done for user-facing flows.
 - [ ] Browser evidence for user-facing changes: a screenshot of every changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Saved under `.sectorfive/evidence/<plan id>/` and handed to the delivering lane, which publishes them to the PR (see Delivery).
+- [ ] PR within the size and role split rule (see Delivery), or the exception is declared in the plan.
+- [ ] No unplanned new files, dependencies or config.
 - [ ] No dangerous action taken without recorded approval.
 - [ ] Completion report present and accurate.
 
@@ -382,6 +390,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.4: contract rules. A cost ceiling tied to v5.3 tiers and the outcome log; no unneeded abstractions, files, dependencies or config; refactors in their own issue; smallest changeset; PR split past ~400 changed lines (tests count; a declared mostly-tests single-role exception) or across roles; a host test policy line in `baseline.md` (`local`, `targeted-only`, `ci-only`); sector-five's cost ceiling, qa gate and veto, and dangerous-actions list hold over host skills that claim to override everything. Two qa checklist boxes.
 
 - v5.3: jev hardening. An optional per-role `harness.tiers` table (standard / flagship / ceiling; `ultra`/`max` only as ceiling). `route` resolves and prints the model under a cost ceiling: a confident standard pick runs on standard, flagship needs a flagship pick or a logged standard failure, and ceiling needs a logged flagship failure plus `--ceiling-approved`. New `outcome` and `report` commands log and summarise step outcomes for tier recalibration. Configs without tiers behave as before.
 
