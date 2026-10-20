@@ -138,9 +138,12 @@ Q3  Harness mode. Before asking, probe which harness CLIs are installed and sign
 {
   "version": 1,
   "dispatcher": { "status": "on | pending | off", "provider": "auto | jev | clef", "fallbackMode": "pinned | ask | block" },
-  "harness": { "mode": "multi | single", "roles": { "<role>": "<harness>/<model> @ <effort>" } }
+  "harness": { "mode": "multi | single", "roles": { "<role>": "<harness>/<model> @ <effort>" },
+               "tiers": { "<role>": { "standard": "<h>/<m> @ <e>", "flagship": "<h>/<m> @ <e>", "ceiling": "<h>/<m> @ <e>" } } }
 }
 ```
+
+`harness.tiers` is optional. A role's table must define all three tiers, and only `ceiling` may name an `ultra` or `max` model or effort (otherwise `check`/`route` exit 6). A role without a table runs on its `harness.roles` pin.
 
 Scaffold `.sectorfive/` when missing — never work from memory when a durable note would do.
 
@@ -343,13 +346,15 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - Dispatcher unavailable (no credentials, provider error, `dispatch.py` exits 2) → apply `fallbackMode` and say so: `pinned` assigns the planned role on its pinned default and marks the step **unrouted** in the plan and the log; `ask` stops for the user; `block` holds the step. Never a silent fallback.
 - `noul` gates run before dangerous actions and at qa's review; a "yes" on danger/scope-breach blocks until planning rules (`dispatch.py gate` exits 4).
 - Up to 64 questions per request; keep dispatcher state factual (task text + plan + diff summary).
+- **Cost ceiling.** `route` resolves and prints `model:` from the picked role's tier table (or its pin). A confident `standard` pick runs on the standard model for every role. `flagship` needs a `flagship` pick or a logged standard failure for the same `--issue` and role. `ceiling` needs a logged flagship failure **and** the user's explicit yes, passed as `--ceiling-approved`. Below `--min-confidence`, `model:` shows the standard model. Escalations are recorded as `escalated` and `escalation_reason`.
+- After each executed step, the owning lane (or planning) records `dispatch.py outcome --issue <key> --role <role> --model <model> --tier <tier> --result pass|fail [--retries N] [--escalated]`. `dispatch.py report [--issue <key>]` summarises routes, outcomes, retries, escalations and tier picks per role and tier, as input for recalibration.
 - Outcomes append to `.sectorfive/dispatch-log.jsonl` in the working repo when `.sectorfive/` exists, for later recalibration.
 - Provider: **Jev** (`POST https://api.typesafe.ai/v1/systemone`, model `jev-latest`, key `TYPESAFE_API_KEY`) by default; **Clef** (`@cf/cloudflare/clef`, model `clef-flash`) via Workers AI as drop-in fallback on Jev error (same System One shape — swap endpoint + credentials only). Self-hosted Clef-flash is a later option for tailnet-local routing.
 
 ## Model policy
 
 - **Contracts are model-agnostic.** Role specs, templates, and protocols must be executable by any frontier model (Meta, Anthropic, OpenAI, xAI). No model-specific prompting tricks in this file.
-- **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice.
+- **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice. With `harness.tiers`, the tier table decides the model and the cost ceiling applies: no `ultra`/`max` default, flagship only after a flagship pick or a standard failure, and ceiling only with the user's yes.
 - **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified 2026-10-12, re-verified 2026-10-13); `muse/muse-wonder-1.0 @ high` (smoke-verified 2026-10-13; needs one supervised cycle before pinning); `grok/grok-4.7 @ default` (smoke-verified 2026-10-13; supersedes grok-4.6). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
 - **Swap rule:** changing a role's pinned model requires re-running that role's recent evaluations (or one supervised task cycle) before unsupervised work.
 - **Writable harness for writing roles.** backend, frontend, polish, and qa must run with workspace write access. Several CLIs default to read-only in non-interactive mode and then silently return analysis instead of edits. Use `codex exec --sandbox workspace-write ...`, `claude -p --permission-mode acceptEdits ...`, `grok -p ... --permission-mode acceptEdits`, and `muse exec ...` (headless muse is `muse exec`; `muse -p` is not a valid flag). Record the permission setting each harness used in `decisions.md` the first time. Never use full-access or bypass modes without recorded approval. In herdr mode the same rule applies to the native args passed to `herdr agent start ... -- <args>`.
@@ -377,6 +382,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.3: jev hardening. An optional per-role `harness.tiers` table (standard / flagship / ceiling; `ultra`/`max` only as ceiling). `route` resolves and prints the model under a cost ceiling: a confident standard pick runs on standard, flagship needs a flagship pick or a logged standard failure, and ceiling needs a logged flagship failure plus `--ceiling-approved`. New `outcome` and `report` commands log and summarise step outcomes for tier recalibration. Configs without tiers behave as before.
 
 - v5.2: herdr lanes. Inside herdr, each issue gets a workspace and each role a long-lived lane that is reused for that issue; planning fans out prompts and fans in with `agent list`/`agent wait`, and answers routine blocked approvals itself. Outside herdr, headless dispatch is unchanged. Issues run in parallel when their files do not overlap. The delivering lane (the last writing lane) pushes, opens and watches its PR; planning still advances work items and qa still gates. New Lane rules: approval hygiene, built-in tools, `gh`, targeted tests, check off issue requirements, no tracker issues without instruction, design system first, plain external text. In-role decisions come from evidence instead of asking planning. Work items take a `lane` field. (Lessons from comparing with Whitby, 2026-10-20.)
 
