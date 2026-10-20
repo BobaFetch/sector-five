@@ -134,6 +134,7 @@ Fields `work set` accepts:
 | --- | --- |
 | `owner` | `backend`, `frontend`, `polish` or `qa` |
 | `branch`, `plan` | text |
+| `lane` | herdr workspace ID for the issue (herdr mode) |
 | `pr` | PR number |
 | `qa.verdict` | `approve` or `veto` |
 | `qa.sha` | the head SHA qa reviewed |
@@ -144,6 +145,38 @@ An empty value (`pr=`) clears a field. `work advance --to <phase>` refuses
 (exit 4) and prints each missing requirement. The requirements per phase are
 in the contract's Work items section. `work show --format json` prints the
 raw state.
+
+## Herdr lanes
+
+When planning runs inside a herdr pane (`HERDR_ENV=1`), roles run as
+long-lived lanes, one workspace per issue. Outside herdr, planning dispatches
+headless CLI calls (`codex exec --sandbox workspace-write`, `claude -p
+--permission-mode acceptEdits`, `muse exec`) as before. The banner states which
+(`lanes: herdr` or `lanes: headless`). Run `herdr --skill` for the full CLI
+guide; the installed binary is the authority on syntax.
+
+```sh
+test "${HERDR_ENV:-}" = 1                       # herdr mode?
+herdr worktree create ...                         # one workspace per issue; read IDs from the JSON
+python3 tools/dispatch.py work set --issue ENG-123 lane=<workspace id>
+herdr pane split --pane <pane in that workspace> --direction right --no-focus
+herdr agent start eng-123-frontend --kind codex --pane <new pane id> -- <pinned args>
+herdr agent prompt eng-123-frontend "<plan step>"   # no --wait: fan out
+herdr agent list                                  # fan in: idle / working / blocked / done
+herdr agent wait eng-123-frontend --timeout 600000
+herdr agent read eng-123-frontend --source recent-unwrapped --lines 200
+```
+
+- Lane names are `<issue>-<role>` in lowercase (herdr names match
+  `[a-z][a-z0-9_-]{0,31}`). Reuse the lane for every later step of the same
+  issue and role.
+- `blocked` means the lane is at an approval or question. Read it with
+  `agent read`. planning answers routine approvals (`agent send-keys`); anything
+  on the contract's Dangerous actions list goes to the user.
+- A timeout or `agent_prompt_stalled` does not prove the prompt was lost. Read
+  the lane before sending it again.
+- Close only panes and workspaces planning created, after
+  `work advance --to merged`.
 
 ## Done check
 

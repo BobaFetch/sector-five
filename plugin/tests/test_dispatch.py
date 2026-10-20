@@ -818,6 +818,13 @@ class WorkTest(WorkRepoCase):
         self.assertIn("ENG-1\tplanned", out)
         self.assertIn("ENG-2\tplanned", out)
 
+    def test_lane_field(self):
+        self.work("new", "--issue", "ENG-1")
+        self.assertIsNone(self.item()["lane"])
+        self.assertEqual(self.work("set", "--issue", "ENG-1", "lane=w3")[0], 0)
+        self.assertEqual(self.item()["lane"], "w3")
+        self.assertIn("lane w3", self.work("show")[1])
+
 
 class DoneCmdTest(WorkRepoCase):
     def setUp(self):

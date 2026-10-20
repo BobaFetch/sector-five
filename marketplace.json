@@ -6,14 +6,14 @@
   "plugins": [
     {
       "name": "sector-five",
-      "version": "0.4.2",
+      "version": "0.5.0",
       "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa).",
       "install": {
         "transport": "local-path",
         "source": "plugin"
       },
       "integrity": {
-        "digest": "sha256:31aed267597142375cb889801283f9d0a755d0769d523ba6d570a9d294e3aac6"
+        "digest": "sha256:0db8b25ccca000b08dd87465b610b79f5b890ce4908b84de5fbb73cba0c2f8cb"
       },
       "availability": {
         "status": "available"

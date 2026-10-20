@@ -385,7 +385,7 @@ def cmd_gate(args):
 
 PHASES = ["planned", "building", "review", "open", "done", "merged"]
 WORK_FIELDS = {
-    "owner": "role", "branch": "str", "pr": "int", "plan": "str",
+    "owner": "role", "branch": "str", "pr": "int", "plan": "str", "lane": "str",
     "qa.verdict": ("approve", "veto"), "qa.sha": "str", "qa.report": "str",
     "ci.preexisting": "list",
 }
@@ -431,7 +431,7 @@ def save_work(item):
 def new_work(issue, plan):
     return {
         "version": 1, "issue": issue, "phase": "planned", "plan": plan,
-        "owner": None, "branch": None, "pr": None,
+        "owner": None, "branch": None, "pr": None, "lane": None,
         "qa": {"verdict": None, "sha": None, "report": None},
         "ci": {"preexisting": []},
         "done": None,
@@ -570,9 +570,10 @@ def cmd_work(args):
         else:
             for item in items:
                 done = item.get("done") or {}
-                print("%s\t%s\t%s\tPR %s\tdone: %s" % (
+                print("%s\t%s\t%s\tPR %s\tlane %s\tdone: %s" % (
                     item["issue"], item["phase"], item.get("owner") or "-",
-                    item.get("pr") or "-", done.get("verdict") or "-"))
+                    item.get("pr") or "-", item.get("lane") or "-",
+                    done.get("verdict") or "-"))
         return 0
     item = load_work(args.issue)
     if args.action == "set":
@@ -1211,7 +1212,7 @@ def build_parser():
     w_new = work_sub.add_parser("new", help="create a work item in phase planned")
     w_new.add_argument("--issue", required=True)
     w_new.add_argument("--plan", help="durable plan path")
-    w_set = work_sub.add_parser("set", help="record fields: owner, branch, pr, plan, "
+    w_set = work_sub.add_parser("set", help="record fields: owner, branch, pr, plan, lane, "
                                             "qa.verdict, qa.sha, qa.report, ci.preexisting")
     w_set.add_argument("--issue", required=True)
     w_set.add_argument("pairs", nargs="+", metavar="field=value")

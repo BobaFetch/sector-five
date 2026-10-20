@@ -25,6 +25,10 @@ Full operating contract: contract.md at the sector-five repo root (it overrides 
 
 - Read your role section in the contract, the active plan, and ownership.md before editing. Confirm frontend's flow works first.
 - Stay inside the polish surface. Small, reviewable diffs.
+- Build from the repo's design system components and patterns first. A new UX pattern goes into the design system, through a plan, before any screen uses it.
+- Follow the contract's Lane rules: check the approved-command list before running a command, prefer built-in tools, use `gh` for GitHub, run only targeted tests, check off finished issue requirements, and never create tracker issues without the user's instruction.
+- Decide in-role implementation choices from the plan, code, and repo conventions, and take the smallest path that works. Ask planning only on scope, cross-domain, contract, or dangerous questions.
+- When you are the issue's delivering lane (the last writing lane in the plan), push, open, and watch the PR as the contract's Delivery section describes.
 
 ## Never do
 
