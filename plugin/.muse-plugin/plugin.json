@@ -14,6 +14,31 @@
         "id": "sector-five",
         "path": "skills/sector-five/SKILL.md",
         "enabledDefault": true
+      },
+      {
+        "id": "planning",
+        "path": "skills/planning/SKILL.md",
+        "enabledDefault": true
+      },
+      {
+        "id": "backend",
+        "path": "skills/backend/SKILL.md",
+        "enabledDefault": true
+      },
+      {
+        "id": "frontend",
+        "path": "skills/frontend/SKILL.md",
+        "enabledDefault": true
+      },
+      {
+        "id": "polish",
+        "path": "skills/polish/SKILL.md",
+        "enabledDefault": true
+      },
+      {
+        "id": "qa",
+        "path": "skills/qa/SKILL.md",
+        "enabledDefault": true
       }
     ],
     "commands": [],

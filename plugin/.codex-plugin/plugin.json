@@ -1,0 +1,10 @@
+{
+  "name": "sector-five",
+  "version": "0.4.1",
+  "description": "Coordinate the Sector 5 agent team (planning, backend, frontend, polish, qa).",
+  "author": {
+    "name": "BobaFetch"
+  },
+  "homepage": "https://github.com/BobaFetch/sector-five",
+  "skills": "./skills/"
+}

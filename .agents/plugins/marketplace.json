@@ -1,0 +1,20 @@
+{
+  "name": "sector-five",
+  "interface": {
+    "displayName": "Sector Five"
+  },
+  "plugins": [
+    {
+      "name": "sector-five",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
