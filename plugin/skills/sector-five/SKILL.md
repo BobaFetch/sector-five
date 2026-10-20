@@ -192,6 +192,8 @@ so config and logs use that repo's `.sectorfive/`:
   one of two role rules (tests belong to qa; qa never edits product code).
   Below that it is a `mismatch` (exit 3): resolve it from the contract's role
   definitions or ask the user.
+- With a configured role model, route text includes `model: <harness/model @ effort> (tier <t>[, escalated: <reason>])`.
+- Log each executed step with `dispatch.py outcome --issue <key> --role <role> --model "<harness/model @ effort>" --tier <tier> --result pass|fail`; summarize with `dispatch.py report [--issue <key>] [--format text|json]`.
 - Pass `--issue <key>` on `route` and `unrouted` so `work advance` can confirm
   the step was dispatched.
 - Yes/no gate: `python3 tools/dispatch.py gate --state "..." --statement "..."`.
