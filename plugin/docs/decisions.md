@@ -205,7 +205,7 @@ repo owner's call.
 
 `work set` and other `work` commands failed from a worktree because each
 checkout had its own `.sectorfive/`. Worktrees now export `SECTORFIVE_STATE`
-pointing at the main checkout's `.sectorfive/`. An empty or missing value is a
+pointing at the main checkout's `.sectorfive/`. An empty value, a missing folder or a file is a
 hard error (exit 2) rather than a fallback to the current checkout, since that
 silent fallback is the bug being fixed. Work-item writes and log appends take
 an `fcntl.flock` on a sidecar `.lock` file (work item, then log), and work
