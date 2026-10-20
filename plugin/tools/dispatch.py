@@ -7,7 +7,7 @@ sector-five repo root (never committed, never printed).
 Exit codes:
   0  routed or override (route) / proceed (gate) / ready or off (check) /
      recorded (unrouted) / done (done) / ok (work)
-  2  usage or provider error (message on stderr)
+  2  usage, provider, validation, or lane/claim state error (message on stderr)
   3  escalate to the user (route confidence below threshold, --expect mismatch
      below --trust, or done judgments unavailable under onUnavailable "escalate") /
      claim conflict (claim)
@@ -593,9 +593,13 @@ def lane_webhook(record):
         print("warning: webhook %s%s" % (type(exc).__name__, detail), file=sys.stderr)
 
 
+def validate_lane_name(lane):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", lane) or lane == "claims" or ".tmp" in lane:
+        raise RuntimeError("invalid or reserved lane name %r" % lane)
+
+
 def cmd_signal(args):
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", args.lane) or args.lane == "claims":
-        raise RuntimeError("invalid or reserved lane name %r" % args.lane)
+    validate_lane_name(args.lane)
     load_work(args.issue)
     directory = os.path.join(state_dir(), "lanes")
     claims = read_lane_json(os.path.join(directory, "claims.json"), [])
@@ -635,8 +639,7 @@ def paths_overlap(a, b):
 
 
 def cmd_claim(args):
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", args.lane) or args.lane == "claims":
-        raise RuntimeError("invalid or reserved lane name %r" % args.lane)
+    validate_lane_name(args.lane)
     if not args.release:
         if not args.issue:
             raise RuntimeError("claim requires --issue unless --release is given")
@@ -648,7 +651,9 @@ def cmd_claim(args):
         with locked(path):
             claims = read_lane_json(path, [])
             others = [c for c in claims if c["lane"] != args.lane]
-            if not args.release:
+            if args.release:
+                entry["released"] = len(others) != len(claims)
+            else:
                 for claim in others:
                     if claim["issue"] == args.issue or any(
                             paths_overlap(a, b) for a in args.path for b in claim.get("paths", [])):
@@ -656,12 +661,14 @@ def cmd_claim(args):
                         return 3
                 others.append(entry)
             atomic_write(path, json.dumps(others) + "\n")
+            record = dict(entry, kind="release" if args.release else "claim")
             log = os.path.join(directory, args.lane + ".jsonl")
             with locked(log):
                 with open(log, "a") as fh:
-                    fh.write(json.dumps(dict(entry, kind="release" if args.release else "claim")) + "\n")
+                    fh.write(json.dumps(record) + "\n")
     except OSError as exc:
         raise RuntimeError("lane state: %s" % type(exc).__name__) from None
+    print(json.dumps(record))
     return 0
 
 
@@ -670,23 +677,28 @@ def cmd_lanes(args):
         raise RuntimeError("stale-after must be finite and non-negative")
     directory = os.path.join(state_dir(), "lanes")
     claims = read_lane_json(os.path.join(directory, "claims.json"), [])
-    lanes = []
+    lanes, errors = [], []
     try:
         for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
             if name == "claims.json" or ".tmp" in name or not re.fullmatch(
                     r"[a-z0-9][a-z0-9._-]{0,63}\.json", name):
                 continue
-            record = read_lane_json(os.path.join(directory, name), {})
+            try:
+                record = read_lane_json(os.path.join(directory, name), {})
+                validate_lane_name(record["lane"])
+                age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(record["ts"])
+            except (RuntimeError, ValueError, KeyError, TypeError):
+                errors.append(name)
+                continue
             if args.issue and record.get("issue") != args.issue:
                 continue
-            age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(record["ts"])
             record["stale"] = age.total_seconds() > args.stale_after * 60
             lanes.append(record)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise RuntimeError("lane state: %s" % type(exc).__name__) from None
     claims = [c for c in claims if not args.issue or c["issue"] == args.issue]
     print(json.dumps({"lanes": sorted(lanes, key=lambda r: r["lane"]),
-                      "claims": sorted(claims, key=lambda c: c["lane"])}))
+                      "claims": sorted(claims, key=lambda c: c["lane"]), "errors": errors}))
     return 0
 
 
