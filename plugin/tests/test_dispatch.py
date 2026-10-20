@@ -1267,3 +1267,68 @@ class TierRouteTest(WorkRepoCase):
             dispatch.main(["report", "--format", "json"])
         row = json.loads(out.getvalue())["rows"][0]
         self.assertEqual((row["outcomes"], row["escalations"]), (2, 1))
+
+
+# --- local-evidence (plan 006) step 2: optional evidence config key ---
+
+class EvidenceConfigTest(WorkRepoCase):
+    def cfg_path(self):
+        return os.path.join(self.meta, "config.json")
+
+    def config_with(self, value):
+        config = make_config()
+        config["evidence"] = value
+        return config
+
+    def route(self):
+        with mock.patch.object(dispatch, "ask", return_value=("jev", tier_answers())), \
+             mock.patch.object(dispatch, "load_dotenv", lambda: None), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = dispatch.main(["route", "--task", "x", "--no-log"])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_missing_key_loads_unchanged(self):
+        config = make_config()
+        self.write_config(config)
+        self.assertEqual(dispatch.load_config(self.cfg_path()), config)
+        self.assertNotIn("evidence", dispatch.load_config(self.cfg_path()))
+        code, out, _ = self.route()
+        self.assertEqual(code, 0)
+        self.assertIn("model: codex/gpt-6.1-sol @ high", out)
+        code, _, _ = self.run_main(["check"], env=JEV_ENV, probe=OK_PROBE)
+        self.assertEqual(code, 0)
+
+    def test_local_loads(self):
+        self.write_config(self.config_with("local"))
+        self.assertEqual(dispatch.load_config(self.cfg_path())["evidence"], "local")
+        self.assertEqual(self.route()[0], 0)
+        code, _, _ = self.run_main(["check"], env=JEV_ENV, probe=OK_PROBE)
+        self.assertEqual(code, 0)
+
+    def test_bad_values_raise(self):
+        for bad in ("branch", "Local", "LOCAL", " local", "", None, 0, 1, True,
+                    ["local"], {"mode": "local"}):
+            self.write_config(self.config_with(bad))
+            with self.assertRaises(ValueError, msg=repr(bad)) as ctx:
+                dispatch.load_config(self.cfg_path())
+            self.assertEqual(str(ctx.exception), "invalid evidence")
+
+    def test_bad_values_exit_six_check_and_route(self):
+        for bad in ("branch", 5, None, ["local"]):
+            self.write_config(self.config_with(bad))
+            code, out, err = self.run_main(["check"], env=JEV_ENV, probe=OK_PROBE)
+            self.assertEqual(code, 6, repr(bad))
+            self.assertIn("invalid config.json", err)
+            code, out, err = self.route()
+            self.assertEqual(code, 6, repr(bad))
+            self.assertEqual(out, "")
+            self.assertIn("invalid config.json", err)
+
+    def test_explicit_check_config_branch_exit_six(self):
+        path = os.path.join(self.repo, "tmp-config.json")
+        with open(path, "w") as fh:
+            json.dump(self.config_with("branch"), fh)
+        code, _, _ = self.run_main(["check", "--config", path], env=JEV_ENV,
+                                   probe=OK_PROBE)
+        self.assertEqual(code, 6)
