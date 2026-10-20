@@ -170,7 +170,8 @@ Decisions (yonaka):
   planning.
 
 Not changed: the `sectorfive-evidence` orphan branch. Some repos ban committed
-screenshots; that needs its own decision.
+screenshots; that needs its own decision. (Superseded 2026-10-20, see below:
+"local evidence replaces the evidence branch".)
 
 ## 2026-10-20 — tier recalibration follow-up closed (jev hardening, contract v5.3)
 
@@ -188,7 +189,8 @@ those route lines are filed under the pick rather than a resolved tier.
 
 ## 2026-10-20 — local evidence replaces the evidence branch (contract v5.5)
 
-Resolves the open note above on the `sectorfive-evidence` orphan branch. qa's
+Supersedes the "Not changed: the `sectorfive-evidence` orphan branch" note in
+the herdr lanes (contract v5.2) entry above. qa's
 screenshots and recordings stay in `.sectorfive/evidence/<plan id>/`, ignored
 through `.git/info/exclude`, and PRs list the file paths only. Branch mode is
 removed rather than kept as a legacy option: it existed only as contract and

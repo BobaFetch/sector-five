@@ -107,8 +107,9 @@ Any agent landing in a repo with no `.sectorfive/` context runs this before feat
 3. **Establish the baseline.** Run the build and full test suite untouched. Record results in `.sectorfive/baseline.md`. A red baseline is reported to planning/the user before any feature work — never fixed silently, never built on without acknowledgment.
 4. **Infer ownership.** Draft `.sectorfive/ownership.md` mapping directories/files to backend/frontend/polish/qa per the role boundaries. planning approves; ambiguous paths are assigned explicitly, never shared by default.
 5. **Index contracts.** Record API surfaces, shared types/schemas, and auth boundaries in `.sectorfive/contracts.md` (pointers to source files, not copies).
-6. **Seed logs.** Create `.sectorfive/tech-debt.md` and `.sectorfive/decisions.md` with any findings from steps 2–5, and add `.sectorfive/evidence/` to `.git/info/exclude` (local, never committed; shared by every worktree).
+6. **Seed logs.** Create `.sectorfive/tech-debt.md` and `.sectorfive/decisions.md` with any findings from steps 2–5.
 7. **Init interview.** planning asks the user the questions below, shows a summary, and writes `.sectorfive/config.json` only after the user confirms. The choices are recorded in `decisions.md`. Re-run on request, or when `config.json` is missing or invalid.
+8. **Ignore evidence.** Add `.sectorfive/evidence/` to `.git/info/exclude` (local, never committed; shared by every worktree).
 
 ### Init interview
 
