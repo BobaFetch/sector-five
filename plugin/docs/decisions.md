@@ -171,3 +171,17 @@ Decisions (yonaka):
 
 Not changed: the `sectorfive-evidence` orphan branch. Some repos ban committed
 screenshots; that needs its own decision.
+
+## 2026-10-20 — tier recalibration follow-up closed (jev hardening, contract v5.3)
+
+Closes the spike follow-up ("tier always returned `standard`… recalibrate tier
+criteria once real dispatch outcomes accumulate"). This repo has no route
+history yet, and the only real dispatch data is from a private client repo
+that cannot be brought in. Decision: the `TIERS` criteria stay unchanged.
+v5.3 adds `dispatch.py outcome` and `dispatch.py report`, so the evidence now
+accumulates here. Re-run the recalibration once this repo's
+`dispatch-log.jsonl` holds at least 50 `outcome` lines.
+
+Known follow-up (fix before the next recalibration): for tierless configs,
+`report` falls back to the raw `tier` pick when `resolved_tier` is null, so
+those route lines are filed under the pick rather than a resolved tier.
