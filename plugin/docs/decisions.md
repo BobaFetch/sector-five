@@ -213,3 +213,20 @@ items are replaced atomically; without the lock, 8 parallel writers lost 95 of
 200 updates. Locking is POSIX only and not reliable on network filesystems;
 Windows is out of scope. Per-issue planner lanes are contract text only; lane
 tooling waits for the orchestrator-hooks change.
+
+## 2026-10-20 — lane signals, lane listing and claims (contract v5.7)
+
+With many parallel lanes, the orchestrator had no way to see each lane's
+status without reading every pane, and nothing stopped two lanes from taking
+the same issue or files. `work signal` records a lane's state in
+`lanes/<lane>.json` plus a `.jsonl` log, `lanes` lists every lane with a
+`stale` flag, and `claim` guards an issue and its paths (exit 3 on conflict).
+Lanes are named `<issue>-<role>`, not just the issue, since several roles
+work one issue and would overwrite each other's file. Bad arguments and
+validation errors exit 2, matching the existing commands; there is no exit 1
+(plan 008 Correction). The webhook is optional and warn-only, with a 2 s
+default timeout capped at 5 s, and its URL is never logged, so a hook outage
+or a token in the URL can't break or leak from a lane. Claims don't expire on
+their own; the orchestrator decides what to release, since a timer could free
+files a slow lane is still writing. Known gaps: `lanes` doesn't check a lane
+file's name against the lane inside it, and `--issue` can't filter `errors`.

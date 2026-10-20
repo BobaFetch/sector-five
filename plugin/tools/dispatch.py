@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Sector 5 decision-model dispatcher (Jev-first, Clef-compatible fallback).
 
-Stdlib-only. Reads keys from the environment or a gitignored `.env` at the
-sector-five repo root (never committed, never printed).
+Stdlib-only. Reads keys from the environment or a gitignored `plugin/.env`
+(never committed, never printed).
 
 Exit codes:
   0  routed or override (route) / proceed (gate) / ready or off (check) /
