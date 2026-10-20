@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v5.6. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v5.7. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -308,6 +308,13 @@ Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, manage
 
 **Locking.** Writes to `work/<issue>.json` and appends to `dispatch-log.jsonl` take an exclusive `fcntl.flock` on a sidecar `.lock` file, and work items are replaced atomically (temp file, then rename). The lock order is work item, then log. Locking is POSIX only (macOS and Linux) and is not reliable on network filesystems; keep `.sectorfive/` on a local disk.
 
+**Lane hooks.** A lane is named `<issue>-<role>` in lowercase (`eng-123-qa`): 1 to 64 characters from `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit, with no `.tmp` anywhere; `claims` is reserved. A bad name is exit 2. Each lane has `lanes/<lane>.json` (its latest state) and `lanes/<lane>.jsonl` (an append-only log) under the state dir. `lanes` does not check that a lane file's name matches the `lane` inside it.
+
+- `work signal --lane <lane> --issue <key> --status starting|working|blocked|review|done|failed|idle [--objective <text>] [--pane <id>] [--sha <sha>] [--note <text>]` merges the given fields into the lane file, sets `ts` (UTC), appends the record to the lane log and prints it as one JSON line. The work item must exist. It warns when the lane has no claim, and exits 2 when the lane's claim is for another issue.
+- **Webhook (optional).** `SECTORFIVE_WEBHOOK_URL` and `SECTORFIVE_WEBHOOK_TIMEOUT`, set in `plugin/.env` or the environment, POST each signal record as JSON. Failures only warn and never change the exit code. The timeout defaults to 2 s and is capped at 5 s; the URL is never printed or logged.
+- `lanes [--issue <key>] [--stale-after <minutes>]` prints `{"lanes": [...], "claims": [...], "errors": [...]}`. Each lane carries `stale: true` when its `ts` is older than `--stale-after` (default 30). Unreadable lane files are listed by file name in `errors` and the command still exits 0; `--issue` filters lanes and claims but not `errors`. A corrupt `claims.json` exits 2.
+- `claim --lane <lane> --issue <key> [--path <path>...]` records the lane's claim in `lanes/claims.json` and prints it as JSON; claiming again replaces the lane's claim. It exits 3 when another lane claims the same issue or an overlapping path: equal paths, one path inside the other's folder, a path matching the other's glob, or two globs where one fixed prefix (the text before the first `*`, `?` or `[`) starts with the other. `claim --lane <lane> --release` drops the claim, prints `released: true`, or `released: false` when there was none, and exits 0 either way. Both are logged to the lane log. Claims never expire on their own: the orchestrator reads `stale` from `lanes` and releases stale claims.
+
 | Phase | Entered when (enforced by `work advance`) |
 | --- | --- |
 | `planned` | `work new --issue <key> --plan <path>` |
@@ -395,6 +402,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.7: orchestrator hooks. Lanes are `<issue>-<role>` (no `.tmp`, `claims` reserved, exit 2) with `lanes/<lane>.json` and a `.jsonl` log under the state dir. `work signal` records and prints lane state and may POST it to an optional webhook (`SECTORFIVE_WEBHOOK_URL`, `SECTORFIVE_WEBHOOK_TIMEOUT`; warn only, 2 s default, 5 s cap, URL never logged). `lanes` prints lanes with `stale`, claims and `errors`. `claim` guards issues and paths (exit 3 on conflict), `claim --release` reports `released`; claims never expire on their own.
 
 - v5.6: concurrency. `SECTORFIVE_STATE` points worktrees at the main checkout's `.sectorfive/`; an empty value, a missing folder or a file is a hard error (exit 2) for every command; unset uses the current checkout. Work-item writes and log appends are locked with `fcntl.flock` sidecar `.lock` files (work item, then log) and work items are written atomically; POSIX only, not for network filesystems. An orchestrator may run one `<issue>-planning` lane per issue.
 
