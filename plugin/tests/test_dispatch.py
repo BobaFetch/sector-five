@@ -1493,3 +1493,238 @@ class StateDirTest(WorkRepoCase):
                      if not n.endswith((".json", ".lock"))]
         self.assertEqual(leftovers, [])
         self.assertFalse(os.path.exists(os.path.join(self._other.name, ".sectorfive")))
+
+
+# --- orchestrator-hooks (plan 008) step 2: signal, lanes, claim, webhook ---
+
+def _lane_worker(state, worker):
+    os.environ["SECTORFIVE_STATE"] = state
+    os.environ.pop("SECTORFIVE_WEBHOOK_URL", None)
+    dispatch.load_dotenv = lambda: None
+    sys.stdout = sys.stderr = open(os.devnull, "w")
+    won = dispatch.main(["claim", "--lane", "l%d" % worker, "--issue", "ENG-1"])
+    codes = [dispatch.main(["work", "signal", "--lane", "l%d" % worker, "--issue",
+                            "ENG-1", "--status", "working", "--note", str(n)])
+             for n in range(10)]
+    return won, codes
+
+
+class LaneCase(WorkRepoCase):
+    def setUp(self):
+        super().setUp()
+        self.env = {"SECTORFIVE_STATE": self.meta}
+        for issue in ("ENG-1", "ENG-2"):
+            self.run_main(["work", "new", "--issue", issue, "--plan", "p.md"],
+                          env=self.env)
+        self.lanes = os.path.join(self.meta, "lanes")
+
+    def cli(self, *argv, env=None):
+        return self.run_main(list(argv), env=dict(self.env, **(env or {})))
+
+    def signal(self, lane="eng-1-qa", issue="ENG-1", status="working", *extra, env=None):
+        return self.cli("work", "signal", "--lane", lane, "--issue", issue,
+                        "--status", status, *extra, env=env)
+
+    def lanes_json(self, *extra):
+        code, out, _ = self.cli("lanes", *extra)
+        self.assertEqual(code, 0)
+        return json.loads(out)
+
+
+class LaneHooksTest(LaneCase):
+    def test_signal_merges_sets_ts_and_logs_each(self):
+        code, out, err = self.signal("eng-1-qa", "ENG-1", "starting", "--objective", "o",
+                                     "--pane", "p1")
+        self.assertEqual(code, 0)
+        self.assertIn("has no claim", err)
+        self.assertEqual(json.loads(out)["status"], "starting")
+        self.signal("eng-1-qa", "ENG-1", "review", "--sha", "abc")
+        with open(os.path.join(self.lanes, "eng-1-qa.json")) as fh:
+            rec = json.load(fh)
+        self.assertEqual((rec["status"], rec["objective"], rec["pane"], rec["sha"]),
+                         ("review", "o", "p1", "abc"))
+        self.assertTrue(dispatch.datetime.datetime.fromisoformat(rec["ts"]).tzinfo)
+        with open(os.path.join(self.lanes, "eng-1-qa.jsonl")) as fh:
+            self.assertEqual([json.loads(l)["status"] for l in fh], ["starting", "review"])
+
+    def test_signal_validation_exits_two(self):
+        for lane in ("../x", "X", "_a", ".a", "a/b", "claims", "a.tmp", "b.tmp1", "a" * 65, ""):
+            self.assertEqual(self.signal(lane)[0], 2, lane)
+            self.assertEqual(self.cli("claim", "--lane", lane or "?", "--issue", "ENG-1")[0], 2)
+        with self.assertRaises(SystemExit) as ctx, mock.patch("sys.stderr", io.StringIO()):
+            self.signal(status="bogus")                         # argparse
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self.signal(issue="ENG-404")[0], 2)  # no work item
+        self.assertEqual(self.cli("claim", "--lane", "a")[0], 2)  # needs --issue
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "x.json")))
+
+    def test_signal_for_other_issue_than_claim_exits_two(self):
+        self.cli("claim", "--lane", "a", "--issue", "ENG-1")
+        self.assertEqual(self.signal("a", "ENG-2")[0], 2)
+        code, _, err = self.signal("a", "ENG-1")
+        self.assertEqual(code, 0)
+        self.assertNotIn("no claim", err)
+
+    def test_lanes_json_stale_and_issue_filter(self):
+        self.assertEqual(self.lanes_json(), {"lanes": [], "claims": [], "errors": []})
+        self.signal("b-lane", "ENG-2")
+        self.signal("a-lane", "ENG-1")
+        self.cli("claim", "--lane", "a-lane", "--issue", "ENG-1", "--path", "src")
+        path = os.path.join(self.lanes, "b-lane.json")
+        with open(path) as fh:
+            rec = json.load(fh)
+        rec["ts"] = "2000-01-01T00:00:00+00:00"
+        with open(path, "w") as fh:
+            json.dump(rec, fh)
+        open(os.path.join(self.lanes, "tmpabc.json.tmp1"), "w").close()
+        data = self.lanes_json()
+        self.assertEqual([(l["lane"], l["stale"]) for l in data["lanes"]],
+                         [("a-lane", False), ("b-lane", True)])
+        self.assertEqual([c["lane"] for c in data["claims"]], ["a-lane"])
+        data = self.lanes_json("--issue", "ENG-2")
+        self.assertEqual(([l["lane"] for l in data["lanes"]], data["claims"]), (["b-lane"], []))
+        self.assertTrue(self.lanes_json("--stale-after", "0")["lanes"][0]["stale"])
+        self.assertEqual(self.cli("lanes", "--stale-after", "-1")[0], 2)
+
+    def test_claim_overlaps_exit_three(self):
+        self.assertEqual(self.cli("claim", "--lane", "a", "--issue", "ENG-1",
+                                  "--path", "src/api", "docs/*.md")[0], 0)
+        clashes = (["--issue", "ENG-1"],                              # same issue
+                   ["--issue", "ENG-2", "--path", "src/api"],         # equal
+                   ["--issue", "ENG-2", "--path", "src/api/x.py"],    # dir prefix
+                   ["--issue", "ENG-2", "--path", "src"],             # parent prefix
+                   ["--issue", "ENG-2", "--path", "docs/a.md"],       # glob vs literal
+                   ["--issue", "ENG-2", "--path", "docs/x*"])         # glob vs glob prefix
+        for extra in clashes:
+            code, _, err = self.cli("claim", "--lane", "b", *extra)
+            self.assertEqual(code, 3, extra)
+            self.assertIn("claim conflict: lane a", err)
+        for disjoint in ("src/apix", "lib", "README.md", "doc/x.md"):
+            self.assertEqual(self.cli("claim", "--lane", "b", "--issue", "ENG-2",
+                                      "--path", disjoint)[0], 0, disjoint)
+        # re-claim replaces, release drops
+        self.cli("claim", "--lane", "a", "--issue", "ENG-1", "--path", "web")
+        self.assertEqual([c["paths"] for c in self.lanes_json()["claims"]
+                          if c["lane"] == "a"], [["web"]])
+        self.assertEqual(self.cli("claim", "--lane", "a", "--release")[0], 0)
+        self.assertEqual([c["lane"] for c in self.lanes_json()["claims"]], ["b"])
+        self.assertEqual(self.cli("claim", "--lane", "c", "--issue", "ENG-1")[0], 0)
+        with open(os.path.join(self.lanes, "a.jsonl")) as fh:
+            self.assertEqual([json.loads(l)["kind"] for l in fh],
+                             ["claim", "claim", "release"])
+
+    def test_claim_prints_record_and_release_flag(self):
+        code, out, _ = self.cli("claim", "--lane", "a", "--issue", "ENG-1", "--path", "src")
+        self.assertEqual(code, 0)
+        self.assertEqual({k: v for k, v in json.loads(out).items() if k != "ts"},
+                         {"lane": "a", "issue": "ENG-1", "paths": ["src"], "kind": "claim"})
+        for want in (True, False):
+            code, out, _ = self.cli("claim", "--lane", "a", "--release")
+            self.assertEqual((code, json.loads(out)["kind"], json.loads(out)["released"]),
+                             (0, "release", want))
+        with open(os.path.join(self.lanes, "a.jsonl")) as fh:
+            self.assertEqual([json.loads(l).get("released") for l in fh], [None, True, False])
+
+    def test_lanes_errors_list_and_corrupt_claims(self):
+        self.signal("good")
+        for name, text in (("bad.json", "{nope"), ("nots.json", '{"lane": "nots"}'),
+                           ("list.json", "[]")):
+            with open(os.path.join(self.lanes, name), "w") as fh:
+                fh.write(text)
+        data = self.lanes_json()
+        self.assertEqual([l["lane"] for l in data["lanes"]], ["good"])
+        self.assertEqual(sorted(data["errors"]), ["bad.json", "list.json", "nots.json"])
+        with open(os.path.join(self.lanes, "claims.json"), "w") as fh:
+            fh.write("{nope")
+        self.assertEqual(self.cli("lanes")[0], 2)
+
+    def test_eight_process_race(self):
+        import multiprocessing
+        with multiprocessing.get_context("spawn").Pool(8) as pool:
+            results = pool.starmap(_lane_worker, [(self.meta, w) for w in range(8)])
+        self.assertEqual(sorted(won for won, _ in results), [0] + [3] * 7)
+        self.assertTrue(all(c == 0 for _, codes in results for c in codes))
+        lanes = self.lanes_json()["lanes"]
+        self.assertEqual([(l["lane"], l["note"]) for l in lanes],
+                         [("l%d" % w, "9") for w in range(8)])
+        self.assertEqual(len(self.lanes_json()["claims"]), 1)
+        for w in range(8):
+            with open(os.path.join(self.lanes, "l%d.jsonl" % w)) as fh:
+                notes = [json.loads(l).get("note") for l in fh]
+            self.assertEqual([n for n in notes if n is not None], [str(n) for n in range(10)])
+
+
+class WebhookTest(LaneCase):
+    def start_server(self, status=200, delay=0):
+        import http.server, threading, time
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                time.sleep(delay)
+                try:
+                    self.send_response(status)
+                    self.end_headers()
+                except OSError:
+                    pass
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = "http://127.0.0.1:%d/hook?token=SECRET" % server.server_port
+        return url, received
+
+    def hook_signal(self, url, timeout="1"):
+        import time
+        start = time.monotonic()
+        code, out, err = self.signal(env={"SECTORFIVE_WEBHOOK_URL": url,
+                                          "SECTORFIVE_WEBHOOK_TIMEOUT": timeout})
+        self.outputs = getattr(self, "outputs", []) + [out, err]
+        return code, err, time.monotonic() - start
+
+    def assert_no_secret(self):
+        for text in self.outputs:
+            self.assertNotIn("SECRET", text)
+            self.assertNotIn("127.0.0.1", text)
+        for dp, _, files in os.walk(self.meta):
+            for name in files:
+                with open(os.path.join(dp, name), errors="replace") as fh:
+                    self.assertNotIn("SECRET", fh.read(), name)
+
+    def test_success_posts_record(self):
+        url, received = self.start_server()
+        code, err, _ = self.hook_signal(url)
+        self.assertEqual(code, 0)
+        self.assertNotIn("warning: webhook", err)
+        self.assertEqual(received[0]["lane"], "eng-1-qa")
+        self.assert_no_secret()
+
+    def test_http_500_warns_exit_zero(self):
+        url, received = self.start_server(status=500)
+        code, err, _ = self.hook_signal(url)
+        self.assertEqual(code, 0)
+        self.assertIn("warning: webhook HTTPError HTTP 500", err)
+        self.assert_no_secret()
+
+    def test_timeout_warns_exit_zero_within_bound(self):
+        url, _ = self.start_server(delay=3)
+        code, err, elapsed = self.hook_signal(url, timeout="1")
+        self.assertEqual(code, 0)
+        self.assertIn("warning: webhook", err)
+        self.assertLess(elapsed, 2.0)
+        with open(os.path.join(self.lanes, "eng-1-qa.json")) as fh:
+            self.assertEqual(json.load(fh)["status"], "working")  # state written first
+        self.assert_no_secret()
+
+    def test_bad_url_and_unset(self):
+        code, err, _ = self.hook_signal("ftp://x/?token=SECRET")
+        self.assertEqual(code, 0)
+        self.assertIn("warning: webhook ValueError", err)
+        code, err, _ = self.hook_signal("")
+        self.assertNotIn("webhook", err)
+        self.assert_no_secret()
