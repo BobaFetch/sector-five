@@ -1548,13 +1548,13 @@ class LaneHooksTest(LaneCase):
             self.assertEqual([json.loads(l)["status"] for l in fh], ["starting", "review"])
 
     def test_signal_validation_exits_two(self):
-        for lane in ("../x", "X", "_a", ".a", "a/b", "claims", "a" * 65, ""):
+        for lane in ("../x", "X", "_a", ".a", "a/b", "claims", "a.tmp", "b.tmp1", "a" * 65, ""):
             self.assertEqual(self.signal(lane)[0], 2, lane)
+            self.assertEqual(self.cli("claim", "--lane", lane or "?", "--issue", "ENG-1")[0], 2)
         with self.assertRaises(SystemExit) as ctx, mock.patch("sys.stderr", io.StringIO()):
             self.signal(status="bogus")                         # argparse
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(self.signal(issue="ENG-404")[0], 2)  # no work item
-        self.assertEqual(self.cli("claim", "--lane", "../x", "--issue", "ENG-1")[0], 2)
         self.assertEqual(self.cli("claim", "--lane", "a")[0], 2)  # needs --issue
         self.assertFalse(os.path.exists(os.path.join(self.repo, "x.json")))
 
@@ -1566,7 +1566,7 @@ class LaneHooksTest(LaneCase):
         self.assertNotIn("no claim", err)
 
     def test_lanes_json_stale_and_issue_filter(self):
-        self.assertEqual(self.lanes_json(), {"lanes": [], "claims": []})
+        self.assertEqual(self.lanes_json(), {"lanes": [], "claims": [], "errors": []})
         self.signal("b-lane", "ENG-2")
         self.signal("a-lane", "ENG-1")
         self.cli("claim", "--lane", "a-lane", "--issue", "ENG-1", "--path", "src")
@@ -1612,6 +1612,31 @@ class LaneHooksTest(LaneCase):
         with open(os.path.join(self.lanes, "a.jsonl")) as fh:
             self.assertEqual([json.loads(l)["kind"] for l in fh],
                              ["claim", "claim", "release"])
+
+    def test_claim_prints_record_and_release_flag(self):
+        code, out, _ = self.cli("claim", "--lane", "a", "--issue", "ENG-1", "--path", "src")
+        self.assertEqual(code, 0)
+        self.assertEqual({k: v for k, v in json.loads(out).items() if k != "ts"},
+                         {"lane": "a", "issue": "ENG-1", "paths": ["src"], "kind": "claim"})
+        for want in (True, False):
+            code, out, _ = self.cli("claim", "--lane", "a", "--release")
+            self.assertEqual((code, json.loads(out)["kind"], json.loads(out)["released"]),
+                             (0, "release", want))
+        with open(os.path.join(self.lanes, "a.jsonl")) as fh:
+            self.assertEqual([json.loads(l).get("released") for l in fh], [None, True, False])
+
+    def test_lanes_errors_list_and_corrupt_claims(self):
+        self.signal("good")
+        for name, text in (("bad.json", "{nope"), ("nots.json", '{"lane": "nots"}'),
+                           ("list.json", "[]")):
+            with open(os.path.join(self.lanes, name), "w") as fh:
+                fh.write(text)
+        data = self.lanes_json()
+        self.assertEqual([l["lane"] for l in data["lanes"]], ["good"])
+        self.assertEqual(sorted(data["errors"]), ["bad.json", "list.json", "nots.json"])
+        with open(os.path.join(self.lanes, "claims.json"), "w") as fh:
+            fh.write("{nope")
+        self.assertEqual(self.cli("lanes")[0], 2)
 
     def test_eight_process_race(self):
         import multiprocessing
