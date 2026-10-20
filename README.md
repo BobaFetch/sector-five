@@ -162,15 +162,11 @@ fallback mode, and the harness mode.
 # marketplace.json, then commit any plugin/ changes. Hash a CLEAN
 # checkout: plugin/.env is hashed but never published, so hashing the
 # worktree poisons the digest and marketplace installs fail integrity.
-S=$(mktemp -d)
-git clone -q . "$S/repo"
-# Install into a throwaway HOME so your real muse install (the one your
-# working repos use) is never replaced or removed.
-HOME="$S/home" XDG_CONFIG_HOME="$S/home/.config" \
-  XDG_DATA_HOME="$S/home/.local/share" XDG_CACHE_HOME="$S/home/.cache" \
-  muse plugins install "$S/repo/plugin" --json | grep package_sha256
-rm -rf "$S"
-# Write the digest into marketplace.json, commit, then tag and push.
+scripts/plugin-digest.sh            # prints the digest Muse verifies
+# (clean clone + throwaway HOME; reads `installed.package_sha256`, NOT
+# `manifest_sha256` -- pinning the manifest hash fails marketplace installs)
+# Write the digest into marketplace.json, commit, then confirm with
+# `scripts/plugin-digest.sh --check` before tagging and pushing.
 ```
 
 Sanity check: re-hashing the previous tag the same way must reproduce its
