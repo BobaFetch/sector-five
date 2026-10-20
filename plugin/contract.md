@@ -143,7 +143,7 @@ Q3  Harness mode. Before asking, probe which harness CLIs are installed and sign
 }
 ```
 
-`harness.tiers` is optional. A role's table must define all three tiers, and only `ceiling` may name an `ultra` or `max` model or effort (otherwise `check`/`route` exit 6). A role without a table runs on its `harness.roles` pin.
+`harness.tiers` is optional and covers the working roles only (a `planning` entry is rejected). A role's table must define all three tiers, and only `ceiling` may name `ultra` or `max` as a whole token in its model or effort (`max-1` is rejected, `maximus` is not). An invalid `config.json`, including the default path, makes `check`/`route` exit 6; a missing default is fine. A role without a table runs on its `harness.roles` pin, and its route log line has `resolved_tier: null`.
 
 Scaffold `.sectorfive/` when missing — never work from memory when a durable note would do.
 
