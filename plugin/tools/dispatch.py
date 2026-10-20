@@ -212,13 +212,14 @@ def load_config(path):
     if not isinstance(tiers, dict):
         raise ValueError("harness.tiers must be an object")
     for role, table in tiers.items():
-        if role not in ("planning", *ROLES):
+        if role not in ROLES:
             raise ValueError("invalid harness tier role")
         if not isinstance(table, dict) or set(table) != {"standard", "flagship", "ceiling"}:
             raise ValueError("harness tier table must define standard, flagship, ceiling")
         for tier, assignment in table.items():
             model, effort = parse_assignment(assignment)
-            if tier != "ceiling" and re.search("ultra|max", model + " " + effort, re.I):
+            tokens = re.split("[^a-z0-9]+", (model + " " + effort).lower())
+            if tier != "ceiling" and any(token in ("ultra", "max") for token in tokens):
                 raise ValueError("ultra/max assignments require the ceiling tier")
     return config
 
@@ -364,7 +365,7 @@ def cmd_route(args):
         decision["expected_role"] = args.expect
     if args.issue is not None:
         decision["issue"] = args.issue
-    model, resolved_tier, reason = None, decision["tier"], None
+    model, resolved_tier, reason = None, None, None
     if config is not None:
         harness = config["harness"]
         table = harness.get("tiers", {}).get(decision["role"])
@@ -403,7 +404,8 @@ def cmd_route(args):
             print("expected: %s" % args.expect)
         if model is not None:
             print("model: %s (tier %s%s)" % (
-                model, resolved_tier, ", escalated: " + reason if reason else ""))
+                model, resolved_tier or decision["tier"],
+                ", escalated: " + reason if reason else ""))
         print("verdict: %s" % decision["verdict"].upper())
     return 0 if confident and not mismatch else 3
 
@@ -441,13 +443,12 @@ def cmd_report(args):
         kind = entry.get("kind")
         if kind not in ("route", "outcome"):
             continue
-        role, tier = entry.get("role"), entry.get("resolved_tier", entry.get("tier"))
+        role, tier = entry.get("role"), entry.get("resolved_tier") or entry.get("tier")
         if role not in ROLES or tier not in (*TIERS, "ceiling"):
             continue
         row = rows.setdefault((role, tier), {
             "role": role, "tier": tier, "routes": 0, "outcomes": 0,
             "pass": 0, "fail": 0, "mean_retries": 0, "escalations": 0})
-        row["escalations"] += bool(entry.get("escalated"))
         if kind == "route":
             row["routes"] += 1
             pick = entry.get("tier")
@@ -455,6 +456,7 @@ def cmd_report(args):
                 picks[pick] = picks.get(pick, 0) + 1
         else:
             row["outcomes"] += 1
+            row["escalations"] += bool(entry.get("escalated"))
             if entry.get("result") in ("pass", "fail"):
                 row[entry["result"]] += 1
             row["mean_retries"] += entry.get("retries", 0)
