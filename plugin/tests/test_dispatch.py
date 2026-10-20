@@ -1197,7 +1197,7 @@ class TierRouteTest(WorkRepoCase):
         self.assertEqual((std["routes"], std["outcomes"], std["fail"]), (1, 1, 1))
         self.assertEqual((flag["routes"], flag["outcomes"], flag["pass"]), (1, 1, 1))
         self.assertEqual(flag["mean_retries"], 3)
-        self.assertEqual(flag["escalations"], 2)  # route line + outcome line
+        self.assertEqual(flag["escalations"], 1)  # outcome lines only
         self.assertEqual(rep["tier_picks"], {"standard": 2})
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             dispatch.main(["report"])
@@ -1209,3 +1209,61 @@ class TierRouteTest(WorkRepoCase):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(dispatch.main(["report", "--format", "json"]), 0)
         self.assertEqual(json.loads(out.getvalue()), {"rows": [], "tier_picks": {}})
+
+    # --- re-check of qa fixes (9d6b44d) ---
+    def test_minimax_style_names_route_fine(self):
+        for ok in ("codex/minimax-m2 @ high", "codex/maximal @ medium",
+                   "codex/ultrawide @ low", "codex/m @ maximum"):
+            config = tiered_config()
+            config["harness"]["tiers"]["backend"]["standard"] = ok
+            self.write_config(config)
+            code, out, _ = self.route(tier_answers(), ["--no-log"])
+            self.assertEqual(code, 0, ok)
+            self.assertIn("model: %s (tier standard)" % ok, out)
+
+    def test_true_ultra_max_tokens_still_exit_six(self):
+        for bad in ("codex/gpt-6-max @ high", "codex/Ultra_1 @ low",
+                    "codex/m.ultra @ x", "codex/m @ MAX"):
+            config = tiered_config()
+            config["harness"]["tiers"]["backend"]["flagship"] = bad
+            self.write_config(config)
+            code, _, _ = self.route(tier_answers())
+            self.assertEqual(code, 6, bad)
+
+    def test_planning_tier_exit_six(self):
+        config = tiered_config()
+        config["harness"]["roles"]["planning"] = "codex/p @ high"
+        config["harness"]["tiers"]["planning"] = tier_table("planning")
+        self.write_config(config)
+        code, _, err = self.route(tier_answers())
+        self.assertEqual(code, 6)
+        code, _, _ = self.run_main(["check"], env=JEV_ENV, probe=OK_PROBE)
+        self.assertEqual(code, 6)
+
+    def test_tierless_logs_resolved_tier_null(self):
+        self.write_config(make_config(roles={"backend": "codex/pin @ high"}))
+        code, out, _ = self.route(tier_answers(tier="flagship"), ["--issue", "E"])
+        self.assertIn("model: codex/pin @ high (tier flagship)", out)
+        with open(self.log_path()) as fh:
+            entry = json.loads(fh.readlines()[-1])
+        self.assertIsNone(entry["resolved_tier"])
+        self.assertEqual(entry["model"], "codex/pin @ high")
+        self.assertFalse(entry["escalated"])
+        _, data = self.route_json(tier_answers(tier="flagship"))
+        self.assertIsNone(data["resolved_tier"])
+
+    def test_escalations_counted_only_from_outcomes(self):
+        self.write_config(tiered_config())
+        self.route(tier_answers(tier="flagship"), ["--issue", "E"])  # escalated route
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            dispatch.main(["report", "--format", "json"])
+        row = json.loads(out.getvalue())["rows"][0]
+        self.assertEqual((row["tier"], row["routes"], row["escalations"]), ("flagship", 1, 0))
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            dispatch.main(["outcome", "--issue", "E", "--role", "backend", "--model", "m",
+                           "--tier", "flagship", "--result", "pass", "--escalated"])
+            self.outcome(issue="E", tier="flagship", result="fail")
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            dispatch.main(["report", "--format", "json"])
+        row = json.loads(out.getvalue())["rows"][0]
+        self.assertEqual((row["outcomes"], row["escalations"]), (2, 1))
