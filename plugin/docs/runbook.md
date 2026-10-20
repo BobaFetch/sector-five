@@ -60,6 +60,8 @@ Status is `on|pending|off`, provider `auto|jev|clef`, fallbackMode
 Role assignments use `harness/model @ effort`. The [contract's Init interview](../contract.md#init-interview)
 is the source of truth for the schema and confirmed choices.
 
+The optional `evidence` key may be omitted or set to `"local"` (the only mode); any other value, including `null`, is invalid config (`check` exits 6).
+
 Planning runs `check` at session start, then opens with the mode banner, e.g.
 `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi`.
 Status `pending` re-prompts for credentials, and mode changes are always announced.

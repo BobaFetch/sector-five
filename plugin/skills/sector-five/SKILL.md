@@ -161,9 +161,9 @@ delivering lane.
 
 The issue's delivering lane (the last writing lane in the plan; planning in
 headless mode) owns delivery. It pushes only after qa approves, opens the PR, and
-publishes qa's evidence by pushing it to the orphan `sectorfive-evidence` branch,
-embedding commit-pinned `?raw=true` links in the PR description. (GitHub has no
-attachment upload API.) It also watches checks, fixes bot findings in its own
+lists each evidence file's repo-relative path under an Evidence heading in the
+PR body. Evidence stays local in `.sectorfive/evidence/<plan id>/` and is never
+committed or pushed anywhere, including a separate branch. It also watches checks, fixes bot findings in its own
 paths (planning routes the rest to the owning role), and watches the PR with `dispatch.py done` until it returns
 `done` or `not_done`. Only planning advances work items. The user merges. See the contract's Delivery section.
 
