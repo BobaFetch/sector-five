@@ -31,6 +31,10 @@ You do not own servers, persistence, auth rules, or integrations. That is backen
 - Handle loading, empty, error, and disabled in the same change that introduces the happy path — only the states the spec needs.
 - No new UI, state, or animation dependency unless the plan approves it.
 - Match the existing client codebase. Components do one job; name state after the user's action.
+- Build from the repo's design system components and patterns first. A new UX pattern goes into the design system, through a plan, before any screen uses it.
+- Follow the contract's Lane rules: check the approved-command list before running a command, prefer built-in tools, use `gh` for GitHub, run only targeted tests, check off finished issue requirements, and never create tracker issues without the user's instruction.
+- Decide in-role implementation choices from the plan, code, and repo conventions, and take the smallest path that works. Ask planning only on scope, cross-domain, contract, or dangerous questions.
+- When you are the issue's delivering lane (the last writing lane in the plan), push, open, and watch the PR as the contract's Delivery section describes.
 
 ## Never do
 

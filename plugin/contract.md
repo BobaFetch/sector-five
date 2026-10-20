@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v5.1. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v5.2. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -14,7 +14,7 @@ description: Five-role agent team. planning leads and dispatches; backend owns c
 1. **Single planner funnel.** Only planning creates plans, assigns work, sequences agents, and approves scope or cross-domain changes.
 2. **Ownership is explicit and checkable.** Every path belongs to exactly one agent (see `.sectorfive/ownership.md`). Same-file overlap is resolved by phase order, never by parallel edits.
 3. **No unplanned changes.** Work outside the plan — including "obvious" cleanups — goes back to planning or into tech debt. Never ships silently.
-4. **Evidence over assumption.** Agents never guess; they stop, cite facts, list options, and ask planning.
+4. **Evidence over assumption.** Agents never guess. Inside their role and the plan, they decide from evidence (plan, code, repo conventions) and take the smallest path that works. Scope, cross-domain, contract, and dangerous questions stop work: cite facts, list options, and ask planning.
 5. **Verification is the gate.** Nothing is done until the plan's verification steps pass, qa signs off, and the repo's done check passes.
 6. **Model-agnostic contracts, pinned defaults.** Role specs run on any frontier model; each role pins a tested default (see Model policy).
 
@@ -158,9 +158,9 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 | `requests/` | planning | Cross-domain requests and their resolutions |
 | `config.json` | planning | Init interview answers: dispatcher status/provider/fallbackMode, harness mode + role assignments |
 | `dispatch-log.jsonl` | planning | Decision-model routing, gate, done and closeout outcomes (append-only) |
-| `work/<issue>.json` | planning (qa records its verdict) | One state file per work item: phase, owner, branch, PR, qa verdict with SHA, last done result, history |
+| `work/<issue>.json` | planning (qa records its verdict) | One state file per work item: phase, owner, branch, PR, herdr lane, qa verdict with SHA, last done result, history |
 | `done.json` | repo owner | Done rules for this repo (optional; the contract defaults apply without it) |
-| `evidence/` | qa | Screenshots and recordings per plan (`evidence/<plan id>/`); planning publishes them to the `sectorfive-evidence` branch for the PR |
+| `evidence/` | qa | Screenshots and recordings per plan (`evidence/<plan id>/`); the delivering lane publishes them to the `sectorfive-evidence` branch for the PR |
 
 ## Operating protocols
 
@@ -169,11 +169,23 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 1. Read your role section in this file plus `ownership.md`, the active plan in `plans/`, and `baseline.md`.
 2. Confirm your task's scope, non-goals, and verification steps from the plan — not from chat memory.
 3. Confirm no other agent is working your files (planning sequences; when in doubt, ask).
-4. **planning only:** read `config.json`, run `dispatch.py check` (it also validates `done.json`), run `dispatch.py work show` to see every open work item and its phase, and open with a one-line mode banner, e.g. `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi (grok missing → muse)`. When status is `pending`, ask again for credentials. A mode that differs from `config.json` is always stated, never applied silently.
+4. **planning only:** read `config.json`, run `dispatch.py check` (it also validates `done.json`), run `dispatch.py work show` to see every open work item and its phase, and check `HERDR_ENV` for the lane mode (see Lanes), and open with a one-line mode banner, e.g. `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi (grok missing → muse) · lanes: herdr`. When status is `pending`, ask again for credentials. A mode that differs from `config.json` is always stated, never applied silently.
 
 ### Phase order
 
-Default sequence: **backend → frontend → polish → qa**. planning may narrow it (e.g. backend-only for a migration) but never parallelizes two agents on the same files. polish always runs after frontend's flow works; qa always runs last and gates completion.
+Default sequence: **backend → frontend → polish → qa**. planning may narrow it (e.g. backend-only for a migration) but never parallelizes two agents on the same files. polish always runs after frontend's flow works; qa always runs last and gates completion. Phase order applies inside one issue. Different issues run in parallel when their files do not overlap (see `ownership.md`); planning never runs two issues on the same files at once.
+
+### Lanes (herdr)
+
+A lane is one role working one issue. Lanes stay open between steps, so a role keeps its context for the whole issue.
+
+- **Mode.** When planning runs inside a herdr pane (`HERDR_ENV=1`), lanes are herdr agents (`lanes: herdr`). Otherwise planning dispatches each step as a headless CLI call, as before (`lanes: headless`). The banner always states the mode; never switch silently.
+- **One workspace per issue.** planning creates it with `herdr worktree create` (one git worktree per issue) and records it with `work set lane=<workspace id>`.
+- **Start a lane on demand.** `herdr pane split --no-focus` in the issue's workspace, then `herdr agent start <issue>-<role> --kind <harness> --pane <pane id> -- <args>`. The harness, model and effort come from the role's pin and the dispatcher's tier choice, as in Model policy. Lane names are lowercase (`eng-123-frontend`). Parse every ID from herdr's JSON output; never guess one.
+- **Reuse lanes.** Later steps for the same issue and role go to the same lane. A lane never takes a second issue.
+- **Fan out, then fan in.** Send work with `herdr agent prompt <lane> "..."` without `--wait`, so planning can start other lanes. Then watch with `herdr agent list` and `herdr agent wait <lane>`, and read results with `herdr agent read <lane> --source recent-unwrapped`. Use `--wait` only for short exchanges. No sleep or polling loops.
+- **Blocked lanes.** When a lane is `blocked` on an approval or question, planning reads it. planning answers a routine approval itself (an approved command, a file edit inside the lane's ownership). Anything on the Dangerous actions list, or outside the plan, goes to the user.
+- **Cleanup.** planning closes only the panes and workspaces it created, after `work advance --to merged`.
 
 ### Handoff protocol (the only cross-domain path)
 
@@ -237,6 +249,17 @@ Migrations and schema changes; auth/permission changes; secrets handling; data d
 - Prefer the repo's existing platforms, libraries, and patterns; introduce nothing new without plan approval.
 - Keep diffs minimal and human-readable; no clever implementations.
 
+### Lane rules (every builder)
+
+- Before running a command, check the harness's approved-command list. Prefer a command that runs without an approval prompt; use one that needs approval only when nothing else works.
+- Prefer the harness's built-in tools over ad-hoc scripts. Never use interactive stdin.
+- Use the `gh` CLI for every GitHub action.
+- Run only the targeted tests for your diff. Full suites belong to CI and the bootstrap baseline. Repo limits in `decisions.md` still apply.
+- When a requirement in the issue is done, check off its box in the issue and read the issue back.
+- Never create tracker issues (GitHub, Linear, Jira) without an explicit instruction from the user.
+- frontend and polish: build from the repo's design system components and patterns first. A new UX pattern goes into the design system, through a plan, before any screen uses it.
+- Write external text (PRs, issue comments, review replies) in plain, short sentences. Use the repo's writing skill when it has one.
+
 ### Completion ritual (every task, every builder)
 
 Return a completion report to planning:
@@ -252,25 +275,25 @@ Follow-ups / tech debt: <or "none">
 
 ### Delivery (push, PR, review feedback)
 
-planning owns delivery; qa's `approve` gates it; the user merges.
+The issue's delivering lane owns delivery: the last writing lane in the plan (usually frontend or polish; backend for a backend-only plan). In headless mode, planning delivers. qa's `approve` gates delivery; only planning advances work items; the user merges.
 
 1. **Push gate.** Push only after qa's adversarial pre-PR review returns `approve` on the current diff. Never push red or unreviewed changes.
-2. **Open the PR.** planning pushes the branch and opens the PR following the repo's PR conventions, linking the issue and the plan.
-3. **Attach evidence.** qa hands planning the captures in `.sectorfive/evidence/<plan id>/`. GitHub has no attachment upload API, so planning hosts them with git:
+2. **Open the PR.** The delivering lane pushes the branch and opens the PR following the repo's PR conventions, linking the issue and the plan.
+3. **Attach evidence.** qa hands the delivering lane the captures in `.sectorfive/evidence/<plan id>/`. GitHub has no attachment upload API, so the delivering lane hosts them with git:
    - Commit them to the orphan branch `sectorfive-evidence` under `<plan id>/` and push it. Never commit them to the feature branch.
    - Embed them in the PR description with links pinned to that commit, `https://github.com/<owner>/<repo>/blob/<sha>/<plan id>/<file>?raw=true`. Screenshots and GIFs render inline; link videos.
    - Keep files small (compressed PNG, short GIFs). In a private repo, the images show only for people with repo access.
    - Pruning the evidence branch means rewriting its history, which is a dangerous action (ask first).
-4. **Watch to a terminal state.** Whoever opens the PR owns it until `dispatch.py done` returns `done` or `not_done`. `pending` (exit 7) means checks are still running or a review bot hasn't scored yet: re-run later. A long wait ends the turn with a named watch (what is pending and where the result will land) and a report when it resolves. If the watch can't be finished, hand it to the user explicitly; never drop it silently. A CI failure goes back to the owning role through planning.
+4. **Watch to a terminal state.** Whoever opens the PR owns it until `dispatch.py done` returns `done` or `not_done`. `pending` (exit 7) means checks are still running or a review bot hasn't scored yet: re-run later. A long wait ends the turn with a named watch (what is pending and where the result will land) and a report when it resolves. If the watch can't be finished, hand it to the user explicitly; never drop it silently. A CI failure in the delivering lane's own paths is fixed there; any other CI failure goes to the owning role through planning.
 5. **Verdicts land on completed CI only.** qa never approves on a partial or still-running suite, and implementers never claim green from a partial run. A failure is treated as pre-existing only with evidence (identical on the base, or passing in isolation), recorded with `work set ci.preexisting=<check names>`. CI usually tests the merge of the PR into its base, not the head alone, so a green local tree can still fail after the base moves. Merge the base in, update drifted assertions, and run again.
 6. **Reruns.** A known infrastructure flake (toolchain or package download errors, dropped cloud connections) may be rerun with `gh run rerun <run id> --failed`. Two failures in a row on the same job need a diagnosis before a third run. Repeated failures are usually real (for example, drift from the base).
-7. **Review feedback.** For each bot finding, planning sends a fix to the owning role, gets qa's `approve` again on the new head, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
+7. **Review feedback.** For each bot finding, the delivering lane fixes it when the file is in its ownership; otherwise planning sends it to the owning role's lane. Either way, gets qa's `approve` again on the new head, pushes, then replies to the thread and resolves it. qa never fixes forward. Human review comments go to the user, and agents never resolve them on the reviewer's behalf.
 8. **Read back every external write.** An issue update, PR body, comment or thread reply is reported as done only after reading the field back and confirming its content, never from a command's exit status alone.
 9. **Merge and close out.** When the done check passes, planning advances the work item to `done` and hands the PR to the user. The user merges unless the repo records otherwise; the team never merges. After the merge, `work advance --to merged` appends the `closeout` line to `dispatch-log.jsonl` (issue, PR, head SHA, check status, review threads by author). Review findings per PR are the team's quality metric.
 
 ### Work items and the done check
 
-Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, managed with `dispatch.py work`. Agents read it to see where the item stands instead of asking. Parallel lanes stay legible because every item records its phase, owner, branch and PR in one place.
+Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, managed with `dispatch.py work`. Agents read it to see where the item stands instead of asking. Parallel lanes stay legible because every item records its phase, owner, branch, PR and herdr lane in one place.
 
 | Phase | Entered when (enforced by `work advance`) |
 | --- | --- |
@@ -297,7 +320,7 @@ Every `done` run is logged and stored on the work item. Comparing done verdicts 
 
 - Agents coordinate through planning, not directly — no agent-to-agent assignments.
 - Agents prefix user-visible responses with their name in brackets: `[planning]`, `[backend]`, `[frontend]`, `[polish]`, `[qa]` — e.g. `[frontend] The form now wires to the new endpoint.` File contents (code, plans, reports) are not prefixed; chat responses are.
-- Never assume: on ambiguity, stop, cite the facts found, list options, and ask planning.
+- Never assume. Decide in-role questions from evidence. On scope, cross-domain, contract, or dangerous questions, stop, cite the facts found, list options, and ask planning.
 - All user-facing claims must be backed by observed evidence (command output, file lines, test results).
 
 ## Decision-model dispatcher (Jev-first, Clef-compatible)
@@ -329,7 +352,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - **Defaults are pinned per role** (see each agent's `model` field, format `harness/model @ effort`). Cost/latency may move polish and routine qa passes down a tier via the dispatcher's tier choice.
 - **Equivalents (smoke-tested 2026-10-12 unless noted):** `muse/muse-spark-1.3 @ high` (verified 2026-10-12, re-verified 2026-10-13); `muse/muse-wonder-1.0 @ high` (smoke-verified 2026-10-13; needs one supervised cycle before pinning); `grok/grok-4.7 @ default` (smoke-verified 2026-10-13; supersedes grok-4.6). Any role may run on an equivalent when its pinned harness is unavailable; record the substitution in `decisions.md`.
 - **Swap rule:** changing a role's pinned model requires re-running that role's recent evaluations (or one supervised task cycle) before unsupervised work.
-- **Writable harness for writing roles.** backend, frontend, polish, and qa must run with workspace write access. Several CLIs default to read-only in non-interactive mode and then silently return analysis instead of edits. Use `codex exec --sandbox workspace-write ...`, `claude -p --permission-mode acceptEdits ...`, `grok -p ... --permission-mode acceptEdits`, and `muse exec ...` (headless muse is `muse exec`; `muse -p` is not a valid flag). Record the permission setting each harness used in `decisions.md` the first time. Never use full-access or bypass modes without recorded approval.
+- **Writable harness for writing roles.** backend, frontend, polish, and qa must run with workspace write access. Several CLIs default to read-only in non-interactive mode and then silently return analysis instead of edits. Use `codex exec --sandbox workspace-write ...`, `claude -p --permission-mode acceptEdits ...`, `grok -p ... --permission-mode acceptEdits`, and `muse exec ...` (headless muse is `muse exec`; `muse -p` is not a valid flag). Record the permission setting each harness used in `decisions.md` the first time. Never use full-access or bypass modes without recorded approval. In herdr mode the same rule applies to the native args passed to `herdr agent start ... -- <args>`.
 - **Empty diff = failed step.** When an implementation step returns, planning checks `git status`/`git diff` in the step's worktree. No changes in the assigned paths means the step failed (usually a read-only sandbox). Re-dispatch it; never accept it as complete.
 - **Read-only steps** (audits, reviews, investigations with no edits in scope) may run read-only. For them, an empty or missing report is the failed-step signal.
 - **Browser capability.** If a role's pinned harness has no browser tools, its browser work runs in a harness that has them (for example Claude with Claude in Chrome) and is recorded as a substitution. The verdict stays with the role. qa can split a step: source tracing on its pin, live browser validation in the browser-capable harness.
@@ -345,7 +368,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - [ ] User-facing copy checks scan rendered text and the accessible attributes `aria-label`, `title`, `alt`, and `placeholder`.
 - [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human). Any finding they would raise is fixed through the owning role before push.
 - [ ] Baseline commands pass with no new warnings; browser/e2e validation done for user-facing flows.
-- [ ] Browser evidence for user-facing changes: a screenshot of every changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Saved under `.sectorfive/evidence/<plan id>/` and handed to planning, who publishes them to the PR (see Delivery).
+- [ ] Browser evidence for user-facing changes: a screenshot of every changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Saved under `.sectorfive/evidence/<plan id>/` and handed to the delivering lane, which publishes them to the PR (see Delivery).
 - [ ] No dangerous action taken without recorded approval.
 - [ ] Completion report present and accurate.
 
@@ -354,6 +377,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.2: herdr lanes. Inside herdr, each issue gets a workspace and each role a long-lived lane that is reused for that issue; planning fans out prompts and fans in with `agent list`/`agent wait`, and answers routine blocked approvals itself. Outside herdr, headless dispatch is unchanged. Issues run in parallel when their files do not overlap. The delivering lane (the last writing lane) pushes, opens and watches its PR; planning still advances work items and qa still gates. New Lane rules: approval hygiene, built-in tools, `gh`, targeted tests, check off issue requirements, no tracker issues without instruction, design system first, plain external text. In-role decisions come from evidence instead of asking planning. Work items take a `lane` field. (Lessons from comparing with Whitby, 2026-10-20.)
 
 - v5.1: the done check adds a `mergeable` fact (conflicts, and optionally how far behind the base), and counts a review bot's score only when it is for the head commit. With `ci.docsOnly`, a head whose docs-only commits got no CI uses the checks of the newest commit below that touched code. Delivery adds the rerun rule (two failures on the same job need a diagnosis) and notes that CI tests the merge with the base. The qa checklist adds that test doubles must match the current code. (yonaka D22, 2026-10-15.)
 

@@ -139,3 +139,35 @@ comparison; that comparison is now reported as unavailable instead of crashing.
 
 Also added to the contract: two failures in a row on the same job need a
 diagnosis before a third rerun, and test doubles must match the current code.
+
+## 2026-10-20 — herdr lanes and Whitby-derived lane rules (v0.5.0, contract v5.2)
+
+Compared Sector 5 with Whitby, a teammate's directive set for running many
+issues at once. Whitby got more done because its lanes are long-lived
+interactive sessions running in parallel, one issue each. Sector 5 ran every
+step as a one-shot headless call, so lanes lost context between steps and
+planning waited on each call. Whitby also spends more model usage, because it
+pins top-tier models for every lane.
+
+Decisions (yonaka):
+
+- Inside herdr, one workspace per issue with a long-lived lane per role. The
+  harness, model and effort still come from the role pins and the dispatcher's
+  tier choice. Whitby's model pins and fast mode are not adopted.
+- herdr is preferred, not required: outside herdr, headless dispatch is
+  unchanged and the banner says `lanes: headless`.
+- The issue's delivering lane (the last writing lane) pushes, opens and watches
+  its PR. planning keeps `work advance`; qa's approve still gates the push.
+  This removes PR watching from planning, which limited how many issues it
+  could run at once.
+- planning fans out prompts without `--wait` and fans in with `agent list` /
+  `agent wait`. With `--wait` on every prompt, planning would block on one lane
+  at a time.
+- Lane rules taken from Whitby, kept generic: approval hygiene, built-in tools
+  over scripts, `gh`, targeted tests only, check off finished issue
+  requirements, no tracker issues without instruction, design system first,
+  plain external text. In-role decisions come from evidence instead of asking
+  planning.
+
+Not changed: the `sectorfive-evidence` orphan branch. Some repos ban committed
+screenshots; that needs its own decision.

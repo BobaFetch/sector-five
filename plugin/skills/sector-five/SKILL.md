@@ -41,7 +41,9 @@ Summaries below never override it.
 - No unplanned changes: out-of-plan work goes back to planning or into tech
   debt. Cross-domain needs become a written request to planning, resolved with
   a durable plan — agents never reach across boundaries themselves.
-- Evidence over assumption: on ambiguity, stop, cite facts, list options, ask.
+- Evidence over assumption: decide in-role questions from evidence; on scope,
+  cross-domain, contract, or dangerous questions, stop, cite facts, list
+  options, ask planning.
 - Verification gates completion: build, tests, lint, and typecheck pass with
   no new warnings, and qa's verdict is approve.
 - Agents prefix user-visible chat responses with their name in brackets
@@ -90,8 +92,9 @@ covers key setup.
 ## Session startup (planning)
 
 Read config, run `python3 tools/dispatch.py check` (it also validates
-`done.json`) and `python3 tools/dispatch.py work show`, then open with one line:
-`[planning] dispatch: jev ✓ · fallback: pinned · harness: multi`.
+`done.json`) and `python3 tools/dispatch.py work show`, check `HERDR_ENV` for
+the lane mode, then open with one line:
+`[planning] dispatch: jev ✓ · fallback: pinned · harness: multi · lanes: herdr`.
 Under `pending`, ask for credentials again. State any mode change explicitly.
 
 - **`on`:** route every plan step before assigning its role and model. If the
@@ -103,6 +106,20 @@ Under `pending`, ask for credentials again. State any mode change explicitly.
 - **`pending` or `off`:** assign roles directly and say so in the banner.
 
 The contract's Startup ritual and Decision-model dispatcher policy govern this flow.
+
+## Lanes (herdr)
+
+Inside herdr (`HERDR_ENV=1`), each issue gets a workspace (`herdr worktree
+create`) and each role a long-lived lane named `<issue>-<role>`, started with
+`herdr agent start` on the role's pinned harness and reused for every later
+step of that issue. planning fans out with `herdr agent prompt` (no `--wait`)
+and fans in with `herdr agent list` / `herdr agent wait`, so issues whose files
+do not overlap run in parallel. planning answers routine approvals in blocked
+lanes and sends dangerous ones to the user. Outside herdr, planning dispatches
+headless CLI calls as before (`lanes: headless`). Builders follow the
+contract's Lane rules: approved commands first, built-in tools, `gh`, targeted
+tests, check off finished issue requirements, no tracker issues without the
+user's instruction, design system first for UI.
 
 ## Templates
 
@@ -117,7 +134,9 @@ role pins a tested default per the contract's Model policy.
 
 Writing roles need a writable harness: `codex exec --sandbox workspace-write`,
 `claude -p --permission-mode acceptEdits`, `grok -p --permission-mode acceptEdits`,
-or `muse exec` (`muse -p` is not a valid flag). A read-only sandbox quietly turns
+or `muse exec` (`muse -p` is not a valid flag). In herdr mode the same
+permission flags go in the native args of `herdr agent start ... -- <args>`.
+A read-only sandbox quietly turns
 an implementation step into analysis. If a step comes back with no diff in its
 assigned paths, it failed: re-dispatch it. Read-only steps such as audits and
 reviews are exempt; for them, an empty report is the failure signal.
@@ -125,16 +144,18 @@ reviews are exempt; for them, an empty report is the failure signal.
 Browser work runs in a harness with browser tools (for example Claude in Chrome)
 when the role's pin has none, and is recorded as a substitution. For user-facing
 changes, qa captures screenshots (desktop and phone) and short recordings of
-changed flows under `.sectorfive/evidence/<plan id>/` and hands them to planning.
+changed flows under `.sectorfive/evidence/<plan id>/` and hands them to the
+delivering lane.
 
 ## Delivery
 
-planning owns delivery. It pushes only after qa approves, opens the PR, and
+The issue's delivering lane (the last writing lane in the plan; planning in
+headless mode) owns delivery. It pushes only after qa approves, opens the PR, and
 publishes qa's evidence by pushing it to the orphan `sectorfive-evidence` branch,
 embedding commit-pinned `?raw=true` links in the PR description. (GitHub has no
-attachment upload API.) It also watches checks, routes bot findings to the
-owning role, and watches the PR with `dispatch.py done` until it returns
-`done` or `not_done`. The user merges. See the contract's Delivery section.
+attachment upload API.) It also watches checks, fixes bot findings in its own
+paths (planning routes the rest to the owning role), and watches the PR with `dispatch.py done` until it returns
+`done` or `not_done`. Only planning advances work items. The user merges. See the contract's Delivery section.
 
 ## Work items and the done check
 

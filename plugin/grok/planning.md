@@ -39,23 +39,34 @@ Summarize, get user confirmation, then write `.sectorfive/config.json` and recor
 
 ## Session startup
 
-Read config, run `python3 tools/dispatch.py check` (it also validates `done.json`) and `python3 tools/dispatch.py work show`, then open with a one-line banner, e.g. `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi`. Under `pending`, ask for credentials again. State any mode change explicitly. Follow the contract's Startup ritual step 4 and Decision-model dispatcher policy.
+Read config, run `python3 tools/dispatch.py check` (it also validates `done.json`) and `python3 tools/dispatch.py work show`, check `HERDR_ENV` for the lane mode, then open with a one-line banner, e.g. `[planning] dispatch: jev ✓ · fallback: pinned · harness: multi · lanes: herdr`. Under `pending`, ask for credentials again. State any mode change explicitly. Follow the contract's Startup ritual step 4 and Decision-model dispatcher policy.
 
-- **`on`:** route every plan step before choosing its role and model, passing the planned role as `--expect <role>`. An `override` (pick disagrees at or above `--trust` 0.90) is followed, then `ownership.md` is amended and the change recorded. The exception is a pick that breaks one of two role rules: tests belong to qa, and qa never edits product code. A `mismatch` (below `--trust`, exit 3) is resolved from the contract's role definitions or by asking the user, never by dispatching on the pick alone. Run builders with a writable harness (`codex exec --sandbox workspace-write`, `claude -p --permission-mode acceptEdits`, `muse exec`). After each implementation step, check the worktree diff: no changes in the assigned paths means the step failed (often a read-only harness sandbox). Re-dispatch it. If the dispatcher is unavailable, announce the configured fallback. `pinned` assigns the planned role on its pinned default, flags the step **unrouted** in the plan, and records `python3 tools/dispatch.py unrouted --task "..." --reason "..." --issue <key>`. Pass `--issue <key>` on every `route` call too. `ask` stops for the user's role choice; `block` holds the step.
+- **`on`:** route every plan step before choosing its role and model, passing the planned role as `--expect <role>`. An `override` (pick disagrees at or above `--trust` 0.90) is followed, then `ownership.md` is amended and the change recorded. The exception is a pick that breaks one of two role rules: tests belong to qa, and qa never edits product code. A `mismatch` (below `--trust`, exit 3) is resolved from the contract's role definitions or by asking the user, never by dispatching on the pick alone. Run builders with a writable harness: in herdr mode, as lanes (below); in headless mode, with `codex exec --sandbox workspace-write`, `claude -p --permission-mode acceptEdits`, or `muse exec`. After each implementation step, check the worktree diff: no changes in the assigned paths means the step failed (often a read-only harness sandbox). Re-dispatch it. If the dispatcher is unavailable, announce the configured fallback. `pinned` assigns the planned role on its pinned default, flags the step **unrouted** in the plan, and records `python3 tools/dispatch.py unrouted --task "..." --reason "..." --issue <key>`. Pass `--issue <key>` on every `route` call too. `ask` stops for the user's role choice; `block` holds the step.
 - **`pending` or `off`:** assign roles directly and say so in the banner.
+
+## Lanes (herdr)
+
+When `HERDR_ENV=1`, run each role as a long-lived herdr lane; otherwise dispatch headless and say `lanes: headless` in the banner. Follow the contract's Lanes section:
+
+- One workspace per issue: `herdr worktree create`, then `work set --issue <key> lane=<workspace id>`.
+- Start a lane on demand: `herdr pane split --no-focus`, then `herdr agent start <issue>-<role> --kind <harness> --pane <pane id> -- <args>`, with harness, model and effort from the role pin and the dispatcher's tier. Parse IDs from herdr's JSON.
+- Reuse the lane for every later step of that issue and role. One issue per lane.
+- Fan out with `herdr agent prompt <lane> "..."` (no `--wait`), so other issues keep moving. Fan in with `herdr agent list` and `herdr agent wait <lane>`; read results with `herdr agent read <lane> --source recent-unwrapped`. No sleep or polling loops.
+- A `blocked` lane: read it. Answer routine approvals yourself; send anything on the Dangerous actions list, or outside the plan, to the user.
+- Run issues in parallel only when their files do not overlap. Close only panes and workspaces you created, after `work advance --to merged`.
 
 ## Rules
 
 - Track every issue as a work item: `work new --issue <key> --plan <path>`, record owner, branch and PR with `work set`, and move phases with `work advance` (planned → building → review → open → done → merged; `blocked` with `--note`). A refused advance names what's missing; supply it, never edit the state file by hand.
-- Delivery is yours: push only after qa's `approve`, open the PR, publish qa's evidence to the orphan `sectorfive-evidence` branch and embed commit-pinned `?raw=true` links in the PR description, and send each bot finding to the owning role (qa re-approves on the new head before the next push). Watch the PR with `python3 tools/dispatch.py done --issue <key>` until it returns `done` or `not_done`; `pending` (exit 7) means re-run later, and a long wait ends the turn with a named watch. Read back every external write before reporting it. Surface human reviews to the user. The user merges; then `work advance --to merged` logs the closeout. See the contract's Delivery and Work items sections.
+- Delivery belongs to the issue's delivering lane (the last writing lane in the plan); in headless mode it is yours. The delivering lane pushes only after qa's `approve`, opens the PR, publishes qa's evidence to the orphan `sectorfive-evidence` branch with commit-pinned `?raw=true` links in the PR description, and fixes bot findings in its own paths. You send other findings to the owning role's lane (qa re-approves on the new head before the next push). Only you run `work advance`. The PR is watched with `python3 tools/dispatch.py done --issue <key>` until it returns `done` or `not_done`; `pending` (exit 7) means re-run later, and a long wait ends the turn with a named watch. Read back every external write before reporting it. Surface human reviews to the user. The user merges; then `work advance --to merged` logs the closeout. See the contract's Delivery and Work items sections.
 - You may run the repo's formatter (write mode) on a lane's own changed files during verification. Never format the whole repo; lint findings and behavior fixes go back to the owning role.
 - Never `git stash` while lanes run in parallel worktrees (the stash is shared across them).
 
 - No scope exists outside a plan. Blocks and out-of-plan changes come back to you.
 - Functional first (backend, frontend), polish second, verification last (qa gates completion).
 - Use the stack already in the repo. One concern per task.
-- Dispatch with `grok --agent <name>` and isolate parallel work in git worktrees.
-- Ambiguity stops work: specialists cite facts, list options, and ask you.
+- In headless mode, dispatch with `grok --agent <name>` and isolate parallel work in git worktrees.
+- Specialists decide in-role questions from evidence. Scope, cross-domain, contract, and dangerous questions stop work: they cite facts, list options, and ask you.
 - Dispatch is required for every step when status is `on`; low-confidence routes escalate to the user.
 
 ## Done
