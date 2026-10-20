@@ -304,7 +304,7 @@ The issue's delivering lane owns delivery: the last writing lane in the plan (us
 
 Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, managed with `dispatch.py work`. Agents read it to see where the item stands instead of asking. Parallel lanes stay legible because every item records its phase, owner, branch, PR and herdr lane in one place.
 
-**Shared state.** `dispatch.py` reads and writes `.sectorfive/` in the current checkout unless `SECTORFIVE_STATE` is set. A worktree exports `SECTORFIVE_STATE` pointing at the main checkout's `.sectorfive/`, so `work` commands work from any worktree and every lane sees the same items. A `SECTORFIVE_STATE` that is empty or names a missing folder is a hard error (exit 2) for every command, including `check`, `gate` and `route`; it never falls back to the current checkout.
+**Shared state.** `dispatch.py` reads and writes `.sectorfive/` in the current checkout unless `SECTORFIVE_STATE` is set. A worktree exports `SECTORFIVE_STATE` pointing at the main checkout's `.sectorfive/`, so `work` commands work from any worktree and every lane sees the same items. A `SECTORFIVE_STATE` that is empty or names a missing folder or a file is a hard error (exit 2) for every command, including `check`, `gate` and `route`; it never falls back to the current checkout.
 
 **Locking.** Writes to `work/<issue>.json` and appends to `dispatch-log.jsonl` take an exclusive `fcntl.flock` on a sidecar `.lock` file, and work items are replaced atomically (temp file, then rename). The lock order is work item, then log. Locking is POSIX only (macOS and Linux) and is not reliable on network filesystems; keep `.sectorfive/` on a local disk.
 

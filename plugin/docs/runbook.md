@@ -174,9 +174,17 @@ headless CLI calls (`codex exec --sandbox workspace-write`, `claude -p
 (`lanes: herdr` or `lanes: headless`). Run `herdr --skill` for the full CLI
 guide; the installed binary is the authority on syntax.
 
+**Shared state.** A worktree exports `SECTORFIVE_STATE` pointing at the main
+checkout's `.sectorfive/`, so `work` commands from any worktree see the same
+items. An empty value, a missing folder or a file is a hard error (exit 2) for
+every command; it never falls back to the current checkout. Locking uses
+`fcntl.flock` on sidecar `.lock` files and is POSIX only (macOS and Linux).
+Keep `.sectorfive/` on a local disk, not a network filesystem.
+
 ```sh
 test "${HERDR_ENV:-}" = 1                       # herdr mode?
 herdr worktree create ...                         # one workspace per issue; read IDs from the JSON
+export SECTORFIVE_STATE="/path/to/main-checkout/.sectorfive"
 python3 tools/dispatch.py work set --issue ENG-123 lane=<workspace id>
 herdr pane split --pane <pane in that workspace> --direction right --no-focus
 herdr agent start eng-123-frontend --kind codex --pane <new pane id> -- <pinned args>
