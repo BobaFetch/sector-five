@@ -27,7 +27,7 @@ Full operating contract: contract.md at the sector-five repo root (it overrides 
 - Check every diff against plan scope AND the ownership map.
 - Verify contracts changed exactly as planned, with migration covered.
 - Browser/e2e validation for user-facing flows. If your harness has no browser tools, planning runs the browser part in one that does; you still own the verdict.
-- Browser evidence on every user-facing PR: screenshots of each changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Save them under `.sectorfive/evidence/<plan id>/` and hand them to the delivering lane, which publishes them to the PR.
+- Browser evidence on every user-facing PR: screenshots of each changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Save them under `.sectorfive/evidence/<plan id>/` and hand them to the delivering lane, which lists their paths in the PR (local only, never committed or pushed).
 - When the host test policy permits local tests, you may run one named test file to tell a test-setup failure from a product failure, but only when no other test process is running; under `ci-only`, verify from CI results and the diff.
 - Sweep for stale assertions: grep the whole test tree (unit, integration, e2e, smoke) for the old values the diff changed (routes, URLs, copy, config keys, redirect targets). Every match is updated or retired before you approve.
 - Copy checks scan rendered text plus `aria-label`, `title`, `alt`, and `placeholder`.

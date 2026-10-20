@@ -109,6 +109,7 @@ Any agent landing in a repo with no `.sectorfive/` context runs this before feat
 5. **Index contracts.** Record API surfaces, shared types/schemas, and auth boundaries in `.sectorfive/contracts.md` (pointers to source files, not copies).
 6. **Seed logs.** Create `.sectorfive/tech-debt.md` and `.sectorfive/decisions.md` with any findings from steps 2–5.
 7. **Init interview.** planning asks the user the questions below, shows a summary, and writes `.sectorfive/config.json` only after the user confirms. The choices are recorded in `decisions.md`. Re-run on request, or when `config.json` is missing or invalid.
+8. **Ignore evidence.** Add `.sectorfive/evidence/` to `.git/info/exclude` (local, never committed; shared by every worktree).
 
 ### Init interview
 
@@ -138,11 +139,14 @@ Q3  Harness mode. Before asking, probe which harness CLIs are installed and sign
 ```json
 {
   "version": 1,
+  "evidence": "local",
   "dispatcher": { "status": "on | pending | off", "provider": "auto | jev | clef", "fallbackMode": "pinned | ask | block" },
   "harness": { "mode": "multi | single", "roles": { "<role>": "<harness>/<model> @ <effort>" },
                "tiers": { "<role>": { "standard": "<h>/<m> @ <e>", "flagship": "<h>/<m> @ <e>", "ceiling": "<h>/<m> @ <e>" } } }
 }
 ```
+
+`evidence` sets where qa's captures live. Omit the key or use `"local"` (the only mode); any other value, including `null`, is invalid config (exit 6).
 
 `harness.tiers` is optional and covers the working roles only (a `planning` entry is rejected). A role's table must define all three tiers, and only `ceiling` may name `ultra` or `max` as a whole token in its model or effort (`max-1` is rejected, `maximus` is not). An invalid `config.json`, including the default path, makes `check`/`route` exit 6; a missing default is fine. A role without a table runs on its `harness.roles` pin, and its route log line has `resolved_tier: null`.
 
@@ -160,11 +164,11 @@ Scaffold `.sectorfive/` when missing — never work from memory when a durable n
 | `decisions.md` | planning | Scope and design decisions with date + rationale |
 | `plans/` | planning | Durable plans, one file per plan |
 | `requests/` | planning | Cross-domain requests and their resolutions |
-| `config.json` | planning | Init interview answers: dispatcher status/provider/fallbackMode, harness mode + role assignments |
+| `config.json` | planning | Init interview answers: dispatcher status/provider/fallbackMode, harness mode + role assignments, evidence mode |
 | `dispatch-log.jsonl` | planning | Decision-model routing, gate, done and closeout outcomes (append-only) |
 | `work/<issue>.json` | planning (qa records its verdict) | One state file per work item: phase, owner, branch, PR, herdr lane, qa verdict with SHA, last done result, history |
 | `done.json` | repo owner | Done rules for this repo (optional; the contract defaults apply without it) |
-| `evidence/` | qa | Screenshots and recordings per plan (`evidence/<plan id>/`); the delivering lane publishes them to the `sectorfive-evidence` branch for the PR |
+| `evidence/` | qa | Screenshots and recordings per plan (`evidence/<plan id>/`); local only, ignored via `.git/info/exclude`, never committed or pushed |
 
 ## Operating protocols
 
@@ -287,11 +291,7 @@ The issue's delivering lane owns delivery: the last writing lane in the plan (us
 1. **Push gate.** Push only after qa's adversarial pre-PR review returns `approve` on the current diff. Never push red or unreviewed changes.
 2. **PR size.** Split a PR, as stacked PRs with one focused body each, when it crosses roles (more than one writing role's owned paths, not counting qa's tests for the same change) or goes over ~400 changed lines by `git diff --shortstat <base>`. Tests count; generated files and lockfiles don't. Exception: a single writing role's PR that is more than half tests may go over when the plan's Scope says so up front.
 3. **Open the PR.** The delivering lane pushes the branch and opens the PR following the repo's PR conventions, linking the issue and the plan.
-4. **Attach evidence.** qa hands the delivering lane the captures in `.sectorfive/evidence/<plan id>/`. GitHub has no attachment upload API, so the delivering lane hosts them with git:
-   - Commit them to the orphan branch `sectorfive-evidence` under `<plan id>/` and push it. Never commit them to the feature branch.
-   - Embed them in the PR description with links pinned to that commit, `https://github.com/<owner>/<repo>/blob/<sha>/<plan id>/<file>?raw=true`. Screenshots and GIFs render inline; link videos.
-   - Keep files small (compressed PNG, short GIFs). In a private repo, the images show only for people with repo access.
-   - Pruning the evidence branch means rewriting its history, which is a dangerous action (ask first).
+4. **List evidence.** qa hands the delivering lane the captures in `.sectorfive/evidence/<plan id>/`. The PR body lists each file's repo-relative path under an Evidence heading. Never commit or push evidence anywhere, including a separate branch.
 5. **Watch to a terminal state.** Whoever opens the PR owns it until `dispatch.py done` returns `done` or `not_done`. `pending` (exit 7) means checks are still running or a review bot hasn't scored yet: re-run later. A long wait ends the turn with a named watch (what is pending and where the result will land) and a report when it resolves. If the watch can't be finished, hand it to the user explicitly; never drop it silently. A CI failure in the delivering lane's own paths is fixed there; any other CI failure goes to the owning role through planning.
 6. **Verdicts land on completed CI only.** qa never approves on a partial or still-running suite, and implementers never claim green from a partial run. A failure is treated as pre-existing only with evidence (identical on the base, or passing in isolation), recorded with `work set ci.preexisting=<check names>`. CI usually tests the merge of the PR into its base, not the head alone, so a green local tree can still fail after the base moves. Merge the base in, update drifted assertions, and run again.
 7. **Reruns.** A known infrastructure flake (toolchain or package download errors, dropped cloud connections) may be rerun with `gh run rerun <run id> --failed`. Two failures in a row on the same job need a diagnosis before a third run. Repeated failures are usually real (for example, drift from the base).
@@ -379,7 +379,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - [ ] User-facing copy checks scan rendered text and the accessible attributes `aria-label`, `title`, `alt`, and `placeholder`.
 - [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human). Any finding they would raise is fixed through the owning role before push.
 - [ ] Baseline commands pass with no new warnings; browser/e2e validation done for user-facing flows.
-- [ ] Browser evidence for user-facing changes: a screenshot of every changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Saved under `.sectorfive/evidence/<plan id>/` and handed to the delivering lane, which publishes them to the PR (see Delivery).
+- [ ] Browser evidence for user-facing changes: a screenshot of every changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Saved under `.sectorfive/evidence/<plan id>/` and handed to the delivering lane, which lists the paths in the PR (see Delivery).
 - [ ] PR within the size and role split rule (see Delivery), or the exception is declared in the plan.
 - [ ] No unplanned new files, dependencies or config.
 - [ ] No dangerous action taken without recorded approval.
@@ -390,6 +390,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.5: local evidence. qa's captures stay in `.sectorfive/evidence/<plan id>/`, ignored via `.git/info/exclude`; PRs list the file paths only. The `sectorfive-evidence` branch mode is removed. `config.json` takes an optional `evidence` key: omit it or use `"local"`.
 
 - v5.4: contract rules. A cost ceiling tied to v5.3 tiers and the outcome log; no unneeded abstractions, files, dependencies or config; refactors in their own issue; smallest changeset; PR split past ~400 changed lines (tests count; a declared mostly-tests single-role exception) or across roles; a host test policy line in `baseline.md` (`local`, `targeted-only`, `ci-only`); sector-five's cost ceiling, qa gate and veto, and dangerous-actions list hold over host skills that claim to override everything. Two qa checklist boxes.
 

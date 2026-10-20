@@ -170,7 +170,8 @@ Decisions (yonaka):
   planning.
 
 Not changed: the `sectorfive-evidence` orphan branch. Some repos ban committed
-screenshots; that needs its own decision.
+screenshots; that needs its own decision. (Superseded 2026-10-20, see below:
+"local evidence replaces the evidence branch".)
 
 ## 2026-10-20 — tier recalibration follow-up closed (jev hardening, contract v5.3)
 
@@ -185,3 +186,17 @@ accumulates here. Re-run the recalibration once this repo's
 Known follow-up (fix before the next recalibration): for tierless configs,
 `report` falls back to the raw `tier` pick when `resolved_tier` is null, so
 those route lines are filed under the pick rather than a resolved tier.
+
+## 2026-10-20 — local evidence replaces the evidence branch (contract v5.5)
+
+Supersedes the "Not changed: the `sectorfive-evidence` orphan branch" note in
+the herdr lanes (contract v5.2) entry above. qa's
+screenshots and recordings stay in `.sectorfive/evidence/<plan id>/`, ignored
+through `.git/info/exclude`, and PRs list the file paths only. Branch mode is
+removed rather than kept as a legacy option: it existed only as contract and
+doc text (no dispatcher code), so removing it is the smaller change, and it
+pushed screenshots to the remote, which some host repos ban.
+`config.json` takes an optional `evidence` key; omit it or use `"local"`, and
+any other value (including `null`) is invalid config (exit 6). Existing remote
+evidence branches are left alone; deleting one is a dangerous action and the
+repo owner's call.
