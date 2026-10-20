@@ -186,6 +186,8 @@ def load_config(path):
         raise ValueError("config must be an object")
     if type(config.get("version")) is not int or config["version"] != 1:
         raise ValueError("config version must be 1")
+    if "evidence" in config and config["evidence"] != "local":
+        raise ValueError("invalid evidence")
     dispatcher = config.get("dispatcher")
     if not isinstance(dispatcher, dict):
         raise ValueError("dispatcher must be an object")
