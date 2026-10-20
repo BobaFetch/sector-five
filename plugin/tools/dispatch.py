@@ -17,13 +17,16 @@ Exit codes:
   7  pending (done: checks still running or a bot score not posted yet)
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import fnmatch
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.request
 import urllib.error
 
@@ -158,13 +161,54 @@ def ask(state, questions, provider, timeout):
     raise RuntimeError("all providers failed: %s" % last_error)
 
 
+def state_dir():
+    value = os.environ.get("SECTORFIVE_STATE")
+    if value is None:
+        return os.path.join(os.getcwd(), ".sectorfive")
+    if not value:
+        raise RuntimeError("SECTORFIVE_STATE is set but empty")
+    path = os.path.abspath(value)
+    if not os.path.isdir(path):
+        raise RuntimeError("SECTORFIVE_STATE must be an existing directory: %s" % path)
+    return path
+
+
+@contextlib.contextmanager
+def locked(path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path + ".lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def atomic_write(path, text):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        prev = os.umask(0)
+        os.umask(prev)
+        os.chmod(tmp, 0o666 & ~prev)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def append_log(entry):
-    d = os.path.join(os.getcwd(), ".sectorfive")
+    d = state_dir()
     if not os.path.isdir(d):
         return
     entry["ts"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with open(os.path.join(d, "dispatch-log.jsonl"), "a") as fh:
-        fh.write(json.dumps(entry) + "\n")
+    path = os.path.join(d, "dispatch-log.jsonl")
+    with locked(path):
+        with open(path, "a") as fh:
+            fh.write(json.dumps(entry) + "\n")
 
 
 def parse_assignment(assignment):
@@ -239,7 +283,7 @@ def check_banner(config, provider, ready):
 def cmd_check(args):
     config = None
     path = args.config if args.config is not None else os.path.join(
-        os.getcwd(), ".sectorfive", "config.json")
+        state_dir(), "config.json")
     if args.config is not None or os.path.lexists(path):
         try:
             config = load_config(path)
@@ -303,7 +347,7 @@ def cmd_unrouted(args):
 
 def cmd_route(args):
     config = None
-    path = args.config or os.path.join(os.getcwd(), ".sectorfive", "config.json")
+    path = args.config or os.path.join(state_dir(), "config.json")
     try:
         config = load_config(path)
     except OSError:
@@ -413,7 +457,7 @@ def cmd_route(args):
 
 
 def read_log(issue=None):
-    path = os.path.join(os.getcwd(), ".sectorfive", "dispatch-log.jsonl")
+    path = os.path.join(state_dir(), "dispatch-log.jsonl")
     try:
         fh = open(path)
     except FileNotFoundError:
@@ -518,8 +562,10 @@ def now():
 
 
 def meta_dir():
-    d = os.path.join(os.getcwd(), ".sectorfive")
+    d = state_dir()
     if not os.path.isdir(d):
+        if "SECTORFIVE_STATE" in os.environ:
+            raise RuntimeError("no .sectorfive/ at %s" % d)
         raise RuntimeError("no .sectorfive/ in the current directory")
     return d
 
@@ -542,11 +588,7 @@ def load_work(issue):
 def save_work(item):
     path = work_path(item["issue"])
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(item, fh, indent=2)
-        fh.write("\n")
-    os.replace(tmp, path)
+    atomic_write(path, json.dumps(item, indent=2) + "\n")
 
 
 def new_work(issue, plan):
@@ -674,10 +716,11 @@ def closeout_entry(item):
 def cmd_work(args):
     if args.action == "new":
         path = work_path(args.issue)
-        if os.path.exists(path):
-            raise RuntimeError("work item %s already exists" % args.issue)
-        item = new_work(args.issue, args.plan)
-        save_work(item)
+        with locked(path):
+            if os.path.exists(path):
+                raise RuntimeError("work item %s already exists" % args.issue)
+            item = new_work(args.issue, args.plan)
+            save_work(item)
         print("%s: planned" % args.issue)
         return 0
     if args.action == "show":
@@ -696,32 +739,34 @@ def cmd_work(args):
                     item.get("pr") or "-", item.get("lane") or "-",
                     done.get("verdict") or "-"))
         return 0
-    item = load_work(args.issue)
-    if args.action == "set":
-        for pair in args.pairs:
-            key, sep, raw = pair.partition("=")
-            if not sep:
-                raise RuntimeError("expected field=value, got %r" % pair)
-            set_field(item, key.strip(), raw.strip())
+    with locked(work_path(args.issue)):
+        item = load_work(args.issue)
+        if args.action == "set":
+            for pair in args.pairs:
+                key, sep, raw = pair.partition("=")
+                if not sep:
+                    raise RuntimeError("expected field=value, got %r" % pair)
+                set_field(item, key.strip(), raw.strip())
+            save_work(item)
+            print("%s: updated %s" % (args.issue, ", ".join(
+                p.partition("=")[0].strip() for p in args.pairs)))
+            return 0
+        # advance
+        if args.to == "blocked" and not args.note:
+            raise RuntimeError("blocking needs --note with the reason")
+        problems = transition_problems(item, args.to)
+        if problems:
+            for problem in problems:
+                print("refused: %s" % problem)
+            return 4
+        previous = item["phase"]
+        item["phase"] = args.to
+        item["history"].append({"ts": now(), "from": previous, "to": args.to,
+                                "note": args.note})
         save_work(item)
-        print("%s: updated %s" % (args.issue, ", ".join(
-            p.partition("=")[0].strip() for p in args.pairs)))
-        return 0
-    # advance
-    if args.to == "blocked" and not args.note:
-        raise RuntimeError("blocking needs --note with the reason")
-    problems = transition_problems(item, args.to)
-    if problems:
-        for problem in problems:
-            print("refused: %s" % problem)
-        return 4
-    previous = item["phase"]
-    item["phase"] = args.to
-    item["history"].append({"ts": now(), "from": previous, "to": args.to,
-                            "note": args.note})
-    save_work(item)
-    if args.to == "merged":
-        append_log(closeout_entry(item))
+        if args.to == "merged":
+            # Lock order: work item first, then log.
+            append_log(closeout_entry(item))
     print("%s: %s → %s" % (args.issue, previous, args.to))
     return 0
 
@@ -837,7 +882,7 @@ def validate_rules(rules):
 def load_rules(path):
     """Owner rules from `path`, the contract defaults when it doesn't exist."""
     if path is None:
-        path = os.path.join(os.getcwd(), ".sectorfive", "done.json")
+        path = os.path.join(state_dir(), "done.json")
         if not os.path.lexists(path):
             return DEFAULT_RULES, None
     with open(path) as fh:
@@ -1256,10 +1301,12 @@ def cmd_done(args):
     if not args.no_log:
         append_log(dict(decision))
     if item is not None:
-        item["done"] = {"verdict": verdict, "sha": facts.get("headSha"), "ts": now(),
-                        "facts": results, "judgments": judged,
-                        "threads": decision["threads"]}
-        save_work(item)
+        with locked(work_path(args.issue)):
+            item = load_work(args.issue)
+            item["done"] = {"verdict": verdict, "sha": facts.get("headSha"), "ts": now(),
+                            "facts": results, "judgments": judged,
+                            "threads": decision["threads"]}
+            save_work(item)
     if args.format == "json":
         print(json.dumps(decision, indent=2))
     else:
@@ -1368,6 +1415,7 @@ def main(argv=None):
     load_dotenv()
     args = build_parser().parse_args(argv)
     try:
+        state_dir()
         return args.func(args)
     except RuntimeError as exc:
         print("dispatch: error: %s" % exc, file=sys.stderr)

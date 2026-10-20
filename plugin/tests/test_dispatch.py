@@ -1332,3 +1332,164 @@ class EvidenceConfigTest(WorkRepoCase):
         code, _, _ = self.run_main(["check", "--config", path], env=JEV_ENV,
                                    probe=OK_PROBE)
         self.assertEqual(code, 6)
+
+
+# --- concurrency (plan 007) step 2: SECTORFIVE_STATE, locked atomic writes ---
+
+def _concurrent_worker(state, worker, writes):
+    """Runs in a child process: real dispatch.main calls against shared state."""
+    os.environ["SECTORFIVE_STATE"] = state
+    dispatch.load_dotenv = lambda: None
+    devnull = open(os.devnull, "w")
+    sys.stdout = sys.stderr = devnull
+    codes = []
+    for n in range(writes):
+        codes.append(dispatch.main(["work", "advance", "--issue", "ENG-1", "--to",
+                                    "blocked", "--note", "w%d-%d" % (worker, n)]))
+        codes.append(dispatch.main(["unrouted", "--task", "w%d-%d" % (worker, n),
+                                    "--issue", "ENG-1"]))
+    return codes
+
+
+class StateDirTest(WorkRepoCase):
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        self._other = tempfile.TemporaryDirectory()  # a folder with no .sectorfive/
+        self.addCleanup(self._other.cleanup)
+
+    def env(self, value):
+        return {"SECTORFIVE_STATE": value}
+
+    def test_unset_uses_cwd(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(os.path.realpath(dispatch.state_dir()),
+                             os.path.realpath(self.meta))
+
+    def test_set_uses_env_from_any_cwd(self):
+        os.chdir(self._other.name)
+        with mock.patch.dict(os.environ, self.env(self.meta), clear=True):
+            self.assertEqual(dispatch.state_dir(), self.meta)
+
+    def test_relative_value_resolved_to_absolute(self):
+        with mock.patch.dict(os.environ, self.env(".sectorfive"), clear=True):
+            path = dispatch.state_dir()
+        self.assertTrue(os.path.isabs(path))
+        self.assertEqual(os.path.realpath(path), os.path.realpath(self.meta))
+
+    def test_missing_path_exits_two(self):
+        missing = os.path.join(self.repo, "nope")
+        code, out, err = self.run_main(["work", "show"], env=self.env(missing))
+        self.assertEqual(code, 2)
+        self.assertIn("SECTORFIVE_STATE must be an existing directory: %s" % missing, err)
+        # Applies to every command, checked up front in main().
+        code, _, _ = self.run_main(["check"], env=dict(JEV_ENV, **self.env(missing)),
+                                   probe=OK_PROBE)
+        self.assertEqual(code, 2)
+
+    def test_file_not_dir_exits_two(self):
+        path = os.path.join(self.repo, "afile")
+        open(path, "w").close()
+        self.assertEqual(self.run_main(["work", "show"], env=self.env(path))[0], 2)
+
+    def test_empty_value_exits_two_set_but_empty(self):
+        os.chdir(self._other.name)
+        code, _, err = self.run_main(["work", "show"], env=self.env(""))
+        self.assertEqual(code, 2)
+        self.assertIn("SECTORFIVE_STATE is set but empty", err)
+
+    def test_new_work_item_mode_follows_umask(self):
+        import stat
+        path = os.path.join(self.meta, "work", "ENG-1.json")
+        for mask, want in ((0o022, 0o644), (0o077, 0o600)):
+            if os.path.exists(path):
+                os.unlink(path)
+            prev = os.umask(mask)
+            try:
+                code, _, _ = self.run_main(["work", "new", "--issue", "ENG-1",
+                                            "--plan", "p.md"])
+            finally:
+                os.umask(prev)
+            self.assertEqual(code, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), want, oct(mask))
+
+    def test_work_set_from_folder_without_sectorfive(self):
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+        os.chdir(self._other.name)
+        code, _, err = self.run_main(["work", "set", "--issue", "ENG-1", "lane=x"])
+        self.assertEqual(code, 2)
+        self.assertIn("no .sectorfive/", err)
+        code, out, _ = self.run_main(["work", "set", "--issue", "ENG-1", "lane=x"],
+                                     env=self.env(self.meta))
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(os.path.join(self._other.name, ".sectorfive")))
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            self.assertEqual(json.load(fh)["lane"], "x")
+        # The log follows the env var too.
+        self.run_main(["unrouted", "--task", "t", "--issue", "ENG-1"],
+                      env=self.env(self.meta))
+        with open(self.log_path()) as fh:
+            self.assertEqual(json.loads(fh.readlines()[-1])["kind"], "unrouted")
+
+    def test_lock_files_ignored_by_show_and_missing_issue_stray_lock(self):
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+        code, _, _ = self.run_main(["work", "set", "--issue", "ENG-9", "lane=x"])
+        self.assertEqual(code, 2)  # no work item; a stray ENG-9.json.lock is fine
+        self.assertFalse(os.path.exists(os.path.join(self.meta, "work", "ENG-9.json")))
+        code, out, _ = self.run_main(["work", "show", "--format", "json"])
+        self.assertEqual(code, 0)
+        self.assertEqual([i["issue"] for i in json.loads(out)], ["ENG-1"])
+
+    def test_atomic_write_failure_leaves_no_temp(self):
+        d = os.path.join(self.meta, "work")
+        os.makedirs(d)
+        target = os.path.join(d, "ENG-1.json")
+        with open(target, "w") as fh:
+            fh.write("original")
+        with mock.patch.object(dispatch.os, "fsync", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                dispatch.atomic_write(target, "new")
+        with mock.patch.object(dispatch.os, "replace", side_effect=OSError("rename")):
+            with self.assertRaises(OSError):
+                dispatch.atomic_write(target, "new")
+        self.assertEqual(os.listdir(d), ["ENG-1.json"])
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "original")
+        dispatch.atomic_write(target, "done")
+        self.assertEqual(os.listdir(d), ["ENG-1.json"])
+
+    def test_save_work_failure_keeps_item_and_no_temp(self):
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+        with mock.patch.object(dispatch.os, "replace", side_effect=OSError("x")):
+            with self.assertRaises(OSError):
+                self.run_main(["work", "set", "--issue", "ENG-1", "lane=y"])
+        d = os.path.join(self.meta, "work")
+        self.assertEqual(sorted(n for n in os.listdir(d) if not n.endswith(".lock")),
+                         ["ENG-1.json"])
+        with open(os.path.join(d, "ENG-1.json")) as fh:
+            self.assertIsNone(json.load(fh).get("lane"))
+
+    def test_concurrent_writers_lose_nothing(self):
+        import multiprocessing
+        workers, writes = 8, 25
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+        os.chdir(self._other.name)
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(workers) as pool:
+            results = pool.starmap(_concurrent_worker,
+                                   [(self.meta, w, writes) for w in range(workers)])
+        self.assertTrue(all(code == 0 for codes in results for code in codes))
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            item = json.load(fh)
+        notes = [h["note"] for h in item["history"] if h.get("note")]
+        want = {"w%d-%d" % (w, n) for w in range(workers) for n in range(writes)}
+        self.assertEqual(len(notes), workers * writes)
+        self.assertEqual(set(notes), want)
+        with open(self.log_path()) as fh:
+            lines = [json.loads(line) for line in fh]  # every line valid JSON
+        self.assertEqual({e["task"] for e in lines if e["kind"] == "unrouted"}, want)
+        self.assertEqual(len(lines), workers * writes)
+        leftovers = [n for n in os.listdir(os.path.join(self.meta, "work"))
+                     if not n.endswith((".json", ".lock"))]
+        self.assertEqual(leftovers, [])
+        self.assertFalse(os.path.exists(os.path.join(self._other.name, ".sectorfive")))
