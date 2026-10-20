@@ -131,6 +131,8 @@ contract's Lane rules: approved commands first, built-in tools, `gh`, targeted
 tests, check off finished issue requirements, no tracker issues without the
 user's instruction, design system first for UI.
 
+Lane hooks (`claim`, `work signal`, `claim --release`, `lanes`): see the runbook's [Lane hooks](../../docs/runbook.md#lane-hooks) and the [contract](../../contract.md#work-items-and-the-done-check).
+
 Worktrees export `SECTORFIVE_STATE` pointing at the main checkout's `.sectorfive/`, so `work` commands from any worktree see the same items. An empty value, a missing folder or a file is a hard error (exit 2) for every command; it never falls back to the current checkout.
 Locking uses `fcntl.flock` on sidecar `.lock` files and is POSIX only (macOS and Linux); keep `.sectorfive/` on a local disk, not a network filesystem. See the contract's [Work items section](../../contract.md#work-items-and-the-done-check).
 

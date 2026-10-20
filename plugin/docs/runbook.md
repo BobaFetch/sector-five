@@ -205,6 +205,20 @@ herdr agent read eng-123-frontend --source recent-unwrapped --lines 200
 - Close only panes and workspaces planning created, after
   `work advance --to merged`.
 
+### Lane hooks
+
+```sh
+python3 tools/dispatch.py claim --lane eng-123-frontend --issue ENG-123 --path <path> [<path> ...]   # before editing (exit 3 on conflict)
+python3 tools/dispatch.py work signal --lane eng-123-frontend --issue ENG-123 --status working   # at each status change: starting|working|blocked|review|done|failed|idle [--objective <text>] [--pane <id>] [--sha <sha>] [--note <text>]
+python3 tools/dispatch.py lanes [--issue ENG-123] [--stale-after 30]   # orchestrator fan-in; stale claims released by the orchestrator
+python3 tools/dispatch.py claim --lane eng-123-frontend --release   # when done
+```
+
+Optional webhook: set `SECTORFIVE_WEBHOOK_URL` / `SECTORFIVE_WEBHOOK_TIMEOUT`
+in `plugin/.env` or the environment; failures only warn.
+See the contract's [Lane hooks](../contract.md#work-items-and-the-done-check)
+for naming, file layout and overlap rules.
+
 ## Done check
 
 ```sh
