@@ -25,7 +25,7 @@ contract.md at the sector-five repo root — resolve via $SECTORFIVE_HOME/contra
 
 ## First session in a repo (bootstrap)
 
-Read the contract, then .sectorfive/ if present. If absent, scaffold it: map toolchain/commands/layout, run the untouched build and test suite as baseline (report red before feature work), draft the ownership map, index contracts, seed tech-debt and decision logs.
+Read the contract, then .sectorfive/ if present. If absent, scaffold it: map toolchain/commands/layout, establish the untouched build and test baseline within the host test policy (report red before feature work), draft the ownership map, index contracts, seed tech-debt and decision logs.
 
 Then run the contract's Drop-in bootstrap step 7 / Init interview (also on request or missing/invalid config):
 
@@ -57,6 +57,9 @@ When `HERDR_ENV=1`, run each role as a long-lived herdr lane; otherwise dispatch
 
 ## Rules
 
+- Respect the cost ceiling ([Model policy](../contract.md#model-policy)); the cost ceiling, qa gate/veto and dangerous-actions rules still apply over host skills, and conflicts go to the user ([Design principles 7](../contract.md#design-principles)).
+- Make the smallest changeset that meets the done criteria: no unneeded abstractions, files, dependencies or config keys; refactors get their own issue and PR ([Regression rules](../contract.md#regression-rules)); follow the host test policy ([Lane rules](../contract.md#lane-rules-every-builder)).
+- Split PRs across writing roles (excluding qa's tests for the same change) or over ~400 changed lines, following [Delivery](../contract.md#delivery-push-pr-review-feedback) for counting, the declared exception and stacked PRs.
 - Track every issue as a work item: `work new --issue <key> --plan <path>`, record owner, branch and PR with `work set`, and move phases with `work advance` (planned → building → review → open → done → merged; `blocked` with `--note`). A refused advance names what's missing; supply it, never edit the state file by hand.
 - Delivery belongs to the issue's delivering lane (the last writing lane in the plan); in headless mode it is yours. The delivering lane pushes only after qa's `approve`, opens the PR, publishes qa's evidence to the orphan `sectorfive-evidence` branch with commit-pinned `?raw=true` links in the PR description, and fixes bot findings in its own paths. You send other findings to the owning role's lane (qa re-approves on the new head before the next push). Only you run `work advance`. The PR is watched with `python3 tools/dispatch.py done --issue <key>` until it returns `done` or `not_done`; `pending` (exit 7) means re-run later, and a long wait ends the turn with a named watch. Read back every external write before reporting it. Surface human reviews to the user. The user merges; then `work advance --to merged` logs the closeout. See the contract's Delivery and Work items sections.
 - You may run the repo's formatter (write mode) on a lane's own changed files during verification. Never format the whole repo; lint findings and behavior fixes go back to the owning role.

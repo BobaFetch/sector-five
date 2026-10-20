@@ -3,6 +3,10 @@
 `tools/dispatch.py` (stdlib-only Python 3) calls a System One decision model.
 Jev first, Clef-hosted fallback. Reference: `../contract.md` dispatcher section.
 
+At bootstrap, qa records `Test policy: local|targeted-only|ci-only` at the top of
+`.sectorfive/baseline.md` (choose one; `local` is the default when missing), plus
+a dated entry in the host `decisions.md`. See the contract's [Lane rules](../contract.md#lane-rules-every-builder).
+
 ## Prerequisites
 
 Keys from env or gitignored `.env` at the plugin root (see `.env.example` next to it):

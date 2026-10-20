@@ -32,6 +32,16 @@ Summaries below never override it.
 
 ## Core rules
 
+- Respect the cost ceiling ([Model policy](../../contract.md#model-policy));
+  the cost ceiling, qa gate/veto and dangerous-actions rules still apply over
+  host skills, and conflicts go to the user ([Design principles 7](../../contract.md#design-principles)).
+- Make the smallest changeset that meets the done criteria: no unneeded
+  abstractions, files, dependencies or config keys; refactors get their own issue
+  and PR ([Regression rules](../../contract.md#regression-rules)); follow the
+  host test policy ([Lane rules](../../contract.md#lane-rules-every-builder)).
+- Split PRs across writing roles (excluding qa's tests for the same change) or
+  over ~400 changed lines, following [Delivery](../../contract.md#delivery-push-pr-review-feedback)
+  for counting, the declared exception and stacked PRs.
 - Single planner funnel: only planning plans, assigns, sequences, and approves
   scope or cross-domain changes. Agents coordinate through planning, never
   directly.
@@ -54,9 +64,9 @@ Summaries below never override it.
 
 First session in an unfamiliar repo: read this skill and the canonical
 contract, then `.sectorfive/` if present. If absent, scaffold it: map the repo
-(toolchain, commands, layout), run the untouched build and test suite as the
-baseline (report red before feature work), infer the ownership map for
-planning's approval, index contracts, and seed tech-debt and decision logs.
+(toolchain, commands, layout), establish the untouched build and test baseline
+within the host test policy (report red before feature work), infer the ownership
+map for planning's approval, index contracts, and seed tech-debt and decision logs.
 Never run record/generate commands (expectation rewrites) casually.
 
 ### Init interview (planning)
