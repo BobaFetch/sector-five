@@ -9,7 +9,8 @@ Exit codes:
      recorded (unrouted) / done (done) / ok (work)
   2  usage or provider error (message on stderr)
   3  escalate to the user (route confidence below threshold, --expect mismatch
-     below --trust, or done judgments unavailable under onUnavailable "escalate")
+     below --trust, or done judgments unavailable under onUnavailable "escalate") /
+     claim conflict (claim)
   4  blocked (gate statement holds at or above threshold) / not done or blocked
      (done) / transition refused (work advance)
   5  no credentials (check)
@@ -559,6 +560,134 @@ ISSUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def read_lane_json(path, default):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("lane state: %s" % type(exc).__name__) from None
+
+
+def lane_webhook(record):
+    url = os.environ.get("SECTORFIVE_WEBHOOK_URL")
+    if not url:
+        return
+    try:
+        timeout = float(os.environ.get("SECTORFIVE_WEBHOOK_TIMEOUT", "2"))
+        timeout = min(timeout, 5) if timeout > 0 else 2
+    except ValueError:
+        timeout = 2
+    try:
+        if not url.startswith(("http://", "https://")):
+            raise ValueError()
+        req = urllib.request.Request(url, data=json.dumps(record).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout):
+            pass
+    except Exception as exc:
+        detail = " HTTP %s" % exc.code if isinstance(exc, urllib.error.HTTPError) else ""
+        print("warning: webhook %s%s" % (type(exc).__name__, detail), file=sys.stderr)
+
+
+def cmd_signal(args):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", args.lane) or args.lane == "claims":
+        raise RuntimeError("invalid or reserved lane name %r" % args.lane)
+    load_work(args.issue)
+    directory = os.path.join(state_dir(), "lanes")
+    claims = read_lane_json(os.path.join(directory, "claims.json"), [])
+    claim = next((c for c in claims if c["lane"] == args.lane), None)
+    if claim and claim["issue"] != args.issue:
+        raise RuntimeError("lane %s holds a claim for another issue" % args.lane)
+    if not claim:
+        print("warning: lane %s has no claim" % args.lane, file=sys.stderr)
+    path = os.path.join(directory, args.lane + ".json")
+    try:
+        with locked(path):
+            record = read_lane_json(path, {})
+            for field in ("lane", "issue", "status", "objective", "pane", "sha", "note"):
+                value = getattr(args, field)
+                if value is not None:
+                    record[field] = value
+            record["ts"] = now()
+            text = json.dumps(record) + "\n"
+            atomic_write(path, text)
+            with locked(path + "l"):
+                with open(path + "l", "a") as fh:
+                    fh.write(text)
+    except OSError as exc:
+        raise RuntimeError("lane state: %s" % type(exc).__name__) from None
+    lane_webhook(record)
+    print(text, end="")
+    return 0
+
+
+def paths_overlap(a, b):
+    if a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/"):
+        return True
+    pa, pb = (re.split(r"[*?\[]", path, maxsplit=1)[0] for path in (a, b))
+    if pa != a and pb != b:
+        return pa.startswith(pb) or pb.startswith(pa)
+    return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a)
+
+
+def cmd_claim(args):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", args.lane) or args.lane == "claims":
+        raise RuntimeError("invalid or reserved lane name %r" % args.lane)
+    if not args.release:
+        if not args.issue:
+            raise RuntimeError("claim requires --issue unless --release is given")
+        load_work(args.issue)
+    directory = os.path.join(state_dir(), "lanes")
+    path = os.path.join(directory, "claims.json")
+    entry = {"lane": args.lane, "issue": args.issue, "paths": args.path, "ts": now()}
+    try:
+        with locked(path):
+            claims = read_lane_json(path, [])
+            others = [c for c in claims if c["lane"] != args.lane]
+            if not args.release:
+                for claim in others:
+                    if claim["issue"] == args.issue or any(
+                            paths_overlap(a, b) for a in args.path for b in claim.get("paths", [])):
+                        print("claim conflict: lane %s" % claim["lane"], file=sys.stderr)
+                        return 3
+                others.append(entry)
+            atomic_write(path, json.dumps(others) + "\n")
+            log = os.path.join(directory, args.lane + ".jsonl")
+            with locked(log):
+                with open(log, "a") as fh:
+                    fh.write(json.dumps(dict(entry, kind="release" if args.release else "claim")) + "\n")
+    except OSError as exc:
+        raise RuntimeError("lane state: %s" % type(exc).__name__) from None
+    return 0
+
+
+def cmd_lanes(args):
+    if not 0 <= args.stale_after < float("inf"):
+        raise RuntimeError("stale-after must be finite and non-negative")
+    directory = os.path.join(state_dir(), "lanes")
+    claims = read_lane_json(os.path.join(directory, "claims.json"), [])
+    lanes = []
+    try:
+        for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
+            if name == "claims.json" or ".tmp" in name or not re.fullmatch(
+                    r"[a-z0-9][a-z0-9._-]{0,63}\.json", name):
+                continue
+            record = read_lane_json(os.path.join(directory, name), {})
+            if args.issue and record.get("issue") != args.issue:
+                continue
+            age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(record["ts"])
+            record["stale"] = age.total_seconds() > args.stale_after * 60
+            lanes.append(record)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("lane state: %s" % type(exc).__name__) from None
+    claims = [c for c in claims if not args.issue or c["issue"] == args.issue]
+    print(json.dumps({"lanes": sorted(lanes, key=lambda r: r["lane"]),
+                      "claims": sorted(claims, key=lambda c: c["lane"])}))
+    return 0
 
 
 def meta_dir():
@@ -1408,6 +1537,24 @@ def build_parser():
     w_show.add_argument("--issue")
     w_show.add_argument("--format", choices=["text", "json"], default="text")
     work.set_defaults(func=cmd_work)
+    signal = work_sub.add_parser("signal", help="record a lane's current state")
+    signal.add_argument("--lane", required=True)
+    signal.add_argument("--issue", required=True)
+    signal.add_argument("--status", required=True,
+                        choices=["starting", "working", "blocked", "review", "done", "failed", "idle"])
+    for field in ("objective", "pane", "sha", "note"):
+        signal.add_argument("--" + field)
+    signal.set_defaults(func=cmd_signal)
+    lanes = sub.add_parser("lanes", help="list lane states and claims as JSON")
+    lanes.add_argument("--issue")
+    lanes.add_argument("--stale-after", type=float, default=30)
+    lanes.set_defaults(func=cmd_lanes)
+    claim = sub.add_parser("claim", help="claim an issue and paths, or release a lane")
+    claim.add_argument("--lane", required=True)
+    claim.add_argument("--issue")
+    claim.add_argument("--path", nargs="+", action="extend", default=[])
+    claim.add_argument("--release", action="store_true")
+    claim.set_defaults(func=cmd_claim)
     return parser
 
 
