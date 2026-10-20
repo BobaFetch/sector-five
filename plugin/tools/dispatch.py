@@ -31,7 +31,6 @@ import urllib.request
 import urllib.error
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_STATE_DIRS = {}
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-latest"
 CLEF_MODEL = "clef-flash"
@@ -166,10 +165,10 @@ def state_dir():
     value = os.environ.get("SECTORFIVE_STATE")
     if value is None:
         return os.path.join(os.getcwd(), ".sectorfive")
-    if value not in _STATE_DIRS:
-        _STATE_DIRS[value] = os.path.abspath(value)
-    path = _STATE_DIRS[value]
-    if not value or not os.path.isdir(path):
+    if not value:
+        raise RuntimeError("SECTORFIVE_STATE is set but empty")
+    path = os.path.abspath(value)
+    if not os.path.isdir(path):
         raise RuntimeError("SECTORFIVE_STATE must be an existing directory: %s" % path)
     return path
 
@@ -192,6 +191,9 @@ def atomic_write(path, text):
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        prev = os.umask(0)
+        os.umask(prev)
+        os.chmod(tmp, 0o666 & ~prev)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -562,6 +564,8 @@ def now():
 def meta_dir():
     d = state_dir()
     if not os.path.isdir(d):
+        if "SECTORFIVE_STATE" in os.environ:
+            raise RuntimeError("no .sectorfive/ at %s" % d)
         raise RuntimeError("no .sectorfive/ in the current directory")
     return d
 
@@ -761,6 +765,7 @@ def cmd_work(args):
                                 "note": args.note})
         save_work(item)
         if args.to == "merged":
+            # Lock order: work item first, then log.
             append_log(closeout_entry(item))
     print("%s: %s → %s" % (args.issue, previous, args.to))
     return 0
