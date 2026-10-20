@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v5.2. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v5.6. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -190,6 +190,7 @@ A lane is one role working one issue. Lanes stay open between steps, so a role k
 - **Mode.** When planning runs inside a herdr pane (`HERDR_ENV=1`), lanes are herdr agents (`lanes: herdr`). Otherwise planning dispatches each step as a headless CLI call, as before (`lanes: headless`). The banner always states the mode; never switch silently.
 - **One workspace per issue.** planning creates it with `herdr worktree create` (one git worktree per issue) and records it with `work set lane=<workspace id>`.
 - **Start a lane on demand.** `herdr pane split --no-focus` in the issue's workspace, then `herdr agent start <issue>-<role> --kind <harness> --pane <pane id> -- <args>`. The harness, model and effort come from the role's pin and the dispatcher's tier choice, as in Model policy. Lane names are lowercase (`eng-123-frontend`). Parse every ID from herdr's JSON output; never guess one.
+- **Per-issue planner lanes.** An orchestrator may run one `<issue>-planning` lane per issue in parallel. Each one changes only its own issue's work item; the shared `dispatch-log.jsonl` is locked, so concurrent appends are safe.
 - **Reuse lanes.** Later steps for the same issue and role go to the same lane. A lane never takes a second issue.
 - **Fan out, then fan in.** Send work with `herdr agent prompt <lane> "..."` without `--wait`, so planning can start other lanes. Then watch with `herdr agent list` and `herdr agent wait <lane>`, and read results with `herdr agent read <lane> --source recent-unwrapped`. Use `--wait` only for short exchanges. No sleep or polling loops.
 - **Blocked lanes.** When a lane is `blocked` on an approval or question, planning reads it. planning answers a routine approval itself (an approved command, a file edit inside the lane's ownership). Anything on the Dangerous actions list, or outside the plan, goes to the user.
@@ -303,6 +304,10 @@ The issue's delivering lane owns delivery: the last writing lane in the plan (us
 
 Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, managed with `dispatch.py work`. Agents read it to see where the item stands instead of asking. Parallel lanes stay legible because every item records its phase, owner, branch, PR and herdr lane in one place.
 
+**Shared state.** `dispatch.py` reads and writes `.sectorfive/` in the current checkout unless `SECTORFIVE_STATE` is set. A worktree exports `SECTORFIVE_STATE` pointing at the main checkout's `.sectorfive/`, so `work` commands work from any worktree and every lane sees the same items. A `SECTORFIVE_STATE` that is empty or names a missing folder is a hard error (exit 2) for every command, including `check`, `gate` and `route`; it never falls back to the current checkout.
+
+**Locking.** Writes to `work/<issue>.json` and appends to `dispatch-log.jsonl` take an exclusive `fcntl.flock` on a sidecar `.lock` file, and work items are replaced atomically (temp file, then rename). The lock order is work item, then log. Locking is POSIX only (macOS and Linux) and is not reliable on network filesystems; keep `.sectorfive/` on a local disk.
+
 | Phase | Entered when (enforced by `work advance`) |
 | --- | --- |
 | `planned` | `work new --issue <key> --plan <path>` |
@@ -390,6 +395,8 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.6: concurrency. `SECTORFIVE_STATE` points worktrees at the main checkout's `.sectorfive/`; empty or missing is a hard error (exit 2) for every command. Work-item writes and log appends are locked with `fcntl.flock` sidecar `.lock` files (work item, then log) and work items are written atomically; POSIX only, not for network filesystems. An orchestrator may run one `<issue>-planning` lane per issue.
 
 - v5.5: local evidence. qa's captures stay in `.sectorfive/evidence/<plan id>/`, ignored via `.git/info/exclude`; PRs list the file paths only. The `sectorfive-evidence` branch mode is removed. `config.json` takes an optional `evidence` key: omit it or use `"local"`.
 
