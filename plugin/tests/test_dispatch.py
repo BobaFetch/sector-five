@@ -1339,7 +1339,6 @@ class EvidenceConfigTest(WorkRepoCase):
 def _concurrent_worker(state, worker, writes):
     """Runs in a child process: real dispatch.main calls against shared state."""
     os.environ["SECTORFIVE_STATE"] = state
-    dispatch._STATE_DIRS.clear()
     dispatch.load_dotenv = lambda: None
     devnull = open(os.devnull, "w")
     sys.stdout = sys.stderr = devnull
@@ -1355,15 +1354,9 @@ def _concurrent_worker(state, worker, writes):
 class StateDirTest(WorkRepoCase):
     def setUp(self):
         super().setUp()
-        dispatch._STATE_DIRS.clear()
         import tempfile
         self._other = tempfile.TemporaryDirectory()  # a folder with no .sectorfive/
         self.addCleanup(self._other.cleanup)
-        self.addCleanup(dispatch._STATE_DIRS.clear)
-
-    def tearDown(self):
-        dispatch._STATE_DIRS.clear()
-        super().tearDown()
 
     def env(self, value):
         return {"SECTORFIVE_STATE": value}
@@ -1399,13 +1392,26 @@ class StateDirTest(WorkRepoCase):
         open(path, "w").close()
         self.assertEqual(self.run_main(["work", "show"], env=self.env(path))[0], 2)
 
-    def test_empty_value_exits_two_naming_cwd(self):
-        # Pins current behaviour: "" resolves to the cwd, so the message names the cwd.
+    def test_empty_value_exits_two_set_but_empty(self):
         os.chdir(self._other.name)
         code, _, err = self.run_main(["work", "show"], env=self.env(""))
         self.assertEqual(code, 2)
-        self.assertIn("SECTORFIVE_STATE must be an existing directory", err)
-        self.assertIn(os.path.basename(self._other.name), err)
+        self.assertIn("SECTORFIVE_STATE is set but empty", err)
+
+    def test_new_work_item_mode_follows_umask(self):
+        import stat
+        path = os.path.join(self.meta, "work", "ENG-1.json")
+        for mask, want in ((0o022, 0o644), (0o077, 0o600)):
+            if os.path.exists(path):
+                os.unlink(path)
+            prev = os.umask(mask)
+            try:
+                code, _, _ = self.run_main(["work", "new", "--issue", "ENG-1",
+                                            "--plan", "p.md"])
+            finally:
+                os.umask(prev)
+            self.assertEqual(code, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), want, oct(mask))
 
     def test_work_set_from_folder_without_sectorfive(self):
         self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
