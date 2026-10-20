@@ -200,3 +200,16 @@ pushed screenshots to the remote, which some host repos ban.
 any other value (including `null`) is invalid config (exit 6). Existing remote
 evidence branches are left alone; deleting one is a dangerous action and the
 repo owner's call.
+
+## 2026-10-20 — shared state and locked writes for parallel lanes (contract v5.6)
+
+`work set` and other `work` commands failed from a worktree because each
+checkout had its own `.sectorfive/`. Worktrees now export `SECTORFIVE_STATE`
+pointing at the main checkout's `.sectorfive/`. An empty value, a missing folder or a file is a
+hard error (exit 2) rather than a fallback to the current checkout, since that
+silent fallback is the bug being fixed. Work-item writes and log appends take
+an `fcntl.flock` on a sidecar `.lock` file (work item, then log), and work
+items are replaced atomically; without the lock, 8 parallel writers lost 95 of
+200 updates. Locking is POSIX only and not reliable on network filesystems;
+Windows is out of scope. Per-issue planner lanes are contract text only; lane
+tooling waits for the orchestrator-hooks change.

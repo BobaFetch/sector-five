@@ -49,6 +49,7 @@ Read config, run `python3 tools/dispatch.py check` (it also validates `done.json
 When `HERDR_ENV=1`, run each role as a long-lived herdr lane; otherwise dispatch headless and say `lanes: headless` in the banner. Follow the contract's Lanes section:
 
 - One workspace per issue: `herdr worktree create`, then `work set --issue <key> lane=<workspace id>`.
+- Worktrees export `SECTORFIVE_STATE` pointing at the main checkout's `.sectorfive/`, so `work` commands from any worktree see the same items. An empty value, a missing folder or a file is a hard error (exit 2) for every command; it never falls back to the current checkout. Locking uses `fcntl.flock` on sidecar `.lock` files and is POSIX only (macOS and Linux); keep `.sectorfive/` on a local disk, not a network filesystem. See the contract's [Work items section](../contract.md#work-items-and-the-done-check).
 - Start a lane on demand: `herdr pane split --no-focus`, then `herdr agent start <issue>-<role> --kind <harness> --pane <pane id> -- <args>`, with harness, model and effort from the role pin and the dispatcher's tier. Parse IDs from herdr's JSON.
 - Reuse the lane for every later step of that issue and role. One issue per lane.
 - Fan out with `herdr agent prompt <lane> "..."` (no `--wait`), so other issues keep moving. Fan in with `herdr agent list` and `herdr agent wait <lane>`; read results with `herdr agent read <lane> --source recent-unwrapped`. No sleep or polling loops.
