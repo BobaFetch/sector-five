@@ -1979,3 +1979,43 @@ class MergeGateTest(WorkRepoCase):
             with self.assertRaises(SystemExit) as ctx, mock.patch("sys.stderr", io.StringIO()):
                 self.run_main(["done", "--issue", "ENG-1", "--pr", bad])
             self.assertEqual(ctx.exception.code, 2)
+
+    # --- re-check of 3170df9 ---
+    def test_relative_plan_from_worktree_via_state(self):
+        import tempfile
+        os.makedirs(os.path.join(self.repo, "plans"))
+        with open(os.path.join(self.repo, "plans", "rel.md"), "w") as fh:
+            fh.write("Blast radius: BR3 — one module\n")
+        self.run_main(["work", "set", "--issue", "ENG-1", "plan=plans/rel.md"])
+        worktree = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, worktree)
+        os.chdir(worktree)
+        state = {"SECTORFIVE_STATE": self.meta}
+        for extra in ([], ["--plan", "plans/rel.md"]):
+            with open(self.facts, "w") as fh:
+                json.dump(gate_facts(), fh)
+            code, out, _ = self.run_main(["merge-gate", "--issue", "ENG-1", "--facts", self.facts,
+                                          "--config", self.cfg, "--format", "json", *extra],
+                                         env=state)
+            self.assertEqual((code, json.loads(out)["blastRadius"]), (0, "BR3"), extra)
+
+    def test_plan_not_found(self):
+        code, data, _ = self.gate(None, "--plan", "nope/missing.md")
+        self.assertEqual(code, 4)
+        self.assertEqual(data["checks"]["blastRadius"]["detail"], "plan not found: nope/missing.md")
+
+    def test_leading_label_decides_severity(self):
+        def body(text):
+            return gate_facts(threads=[{"resolved": False, "outdated": False,
+                                        "author": "bot", "body": text}])
+        for text, want in (("nit: not critical, rename", "pass"), ("**[P3]** critical-ish", "pass"),
+                           ("critical: just a nit", "fail"), ("> Major: minor style", "fail")):
+            self.assertEqual(self.status(body(text), "threads")[1], want, text)
+
+    def test_no_merge_gate_message_missing_or_absent(self):
+        os.unlink(self.cfg)
+        for _ in range(2):
+            code, _, err = self.gate()
+            self.assertEqual(code, 6)
+            self.assertIn("no mergeGate config", err)
+            self.gate_config(None)
