@@ -2150,13 +2150,17 @@ class SmallPortsTest(WorkRepoCase):
 # --- small-ports (plan 010) PR A2: pane rename, prs, merged per PR, gate stack pending ---
 
 class PaneRenameTest(LaneCase):
-    def rename(self, *extra, herdr="1", returncode=0, error=None):
+    def rename(self, *extra, herdr="1", returncode=0, error=None, lane="eng-1-qa"):
         proc = mock.Mock(returncode=returncode, stdout="", stderr="")
         run = mock.Mock(side_effect=error) if error else mock.Mock(return_value=proc)
         env = {"HERDR_ENV": herdr} if herdr else {}
         with mock.patch.object(dispatch.subprocess, "run", run):
-            code, _, err = self.signal("eng-1-qa", "ENG-1", "working", *extra, env=env)
+            code, _, err = self.signal(lane, "ENG-1", "working", *extra, env=env)
         return code, run, err
+
+    def label(self, pane="p1", lane="eng-1-qa"):
+        with open(os.path.join(self.meta, "lanes", lane + ".json")) as fh:
+            return json.load(fh).get("paneLabels", {}).get(pane)
 
     def test_renames_with_issue_and_objective_capped(self):
         code, run, _ = self.rename("--pane", "p1", "--objective", "x" * 80)
@@ -2171,9 +2175,7 @@ class PaneRenameTest(LaneCase):
         run.assert_not_called()
 
     def test_label_change_renames_and_failure_not_recorded(self):
-        def label():
-            with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
-                return json.load(fh).get("paneLabel")
+        label = self.label
         self.rename("--pane", "p1", "--objective", "a")
         self.assertEqual(label(), "ENG-1 · a")
         run = self.rename("--pane", "p1", "--objective", "b")[1]
@@ -2184,6 +2186,28 @@ class PaneRenameTest(LaneCase):
         self.assertEqual(label(), "ENG-1 · b")
         run = self.rename("--pane", "p1", "--objective", "c")[1]  # retried after failure
         run.assert_called_once()
+
+    def test_new_pane_and_lanes_rename_independently(self):
+        self.rename("--pane", "p1", "--objective", "a")
+        run = self.rename("--pane", "p2")[1]  # same label, new pane
+        self.assertEqual(run.call_args.args[0][3:], ["p2", "ENG-1 · a"])
+        self.assertEqual((self.label("p1"), self.label("p2")), ("ENG-1 · a",) * 2)
+        run = self.rename("--pane", "p3", "--objective", "a", lane="eng-1-fe")[1]
+        run.assert_called_once()
+        self.rename("--pane", "p1")[1].assert_not_called()  # qa lane unaffected by fe lane
+        self.assertEqual(self.label("p3", "eng-1-fe"), "ENG-1 · a")
+        self.assertIsNone(self.label("p3"))
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            self.assertNotIn("paneLabel", json.load(fh))
+        self.assertEqual(self.lanes_json()["lanes"][0]["status"], "working")
+
+    def test_rename_errors_only_warn(self):
+        for err in (FileNotFoundError(), dispatch.subprocess.TimeoutExpired("herdr", 2),
+                    ValueError("x"), RuntimeError("x")):
+            code, _, out = self.rename("--pane", "p1", "--objective", repr(err), error=err)
+            self.assertEqual(code, 0, err)
+            self.assertIn("warning: herdr pane rename: " + type(err).__name__, out)
+        self.assertIsNone(self.label())
 
     def test_lane_name_without_objective(self):
         self.assertEqual(self.rename("--pane", "p1")[1].call_args.args[0][4], "eng-1-qa")
