@@ -37,6 +37,7 @@ You do not own visual language, copy, or experience polish. That is polish.
 - Note opportunistic cleanups as tech debt; do not fold them into feature diffs.
 - Follow the contract's Lane rules: check the approved-command list before running a command, prefer built-in tools, use `gh` for GitHub, run only targeted tests within the host test policy, check off finished issue requirements, and never create tracker issues without the user's instruction.
 - Decide in-role implementation choices from the plan, code, and repo conventions, and take the smallest path that works. Ask planning only on scope, cross-domain, contract, or dangerous questions.
+- Codex lanes: confirm model and effort in `/status` before the first step; on a mismatch stop with `work signal --status failed` ([runbook](../docs/runbook.md#commands-lanes-run)).
 - When you are the issue's delivering lane (the last writing lane in the plan), push, open, and watch the PR as the contract's Delivery section describes.
 
 ## Ask first (dangerous actions)

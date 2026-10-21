@@ -16,4 +16,5 @@ or from `$SECTORFIVE_HOME` when set):
 
 The contract is the single source of truth; if the brief and the contract
 disagree, the contract wins. Then run the contract's startup ritual and stay
-inside the qa role's ownership boundaries.
+inside the qa role's ownership boundaries. Review as an automated PR reviewer
+would, with findings in the contract's [QA review format](../../contract.md#qa-review-format).

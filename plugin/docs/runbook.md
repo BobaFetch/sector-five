@@ -139,7 +139,7 @@ One state file per issue at `.sectorfive/work/<issue>.json`. Issue keys are
 letters, digits, `.`, `_` and `-` (for example `ENG-123`).
 
 ```sh
-python3 tools/dispatch.py work new --issue ENG-123 --plan .sectorfive/plans/eng-123.md
+python3 tools/dispatch.py work new --issue ENG-123   # finds plans/*eng-123*.md; or --plan <path>
 python3 tools/dispatch.py work set --issue ENG-123 owner=frontend branch=fix/eng-123-x
 python3 tools/dispatch.py route --task "..." --plan .sectorfive/plans/eng-123.md \
   --expect frontend --issue ENG-123
@@ -154,11 +154,13 @@ Fields `work set` accepts:
 | `owner` | `backend`, `frontend`, `polish` or `qa` |
 | `branch`, `plan` | text |
 | `lane` | herdr workspace ID for the issue (herdr mode) |
-| `pr` | PR number |
+| `pr` | PR number; also appended to `prs` when new |
 | `qa.verdict` | `approve` or `veto` |
 | `qa.sha` | the head SHA qa reviewed |
 | `qa.report` | path to qa's report (used as judgment evidence) |
 | `ci.preexisting` | comma-separated check names proven to fail on the base too |
+
+`--prs 20,21` replaces the PR list (duplicates dropped, the item's `pr` always kept). See [Multi-PR items](../contract.md#multi-pr-items).
 
 An empty value (`pr=`) clears a field. `work advance --to <phase>` refuses
 (exit 4) and prints each missing requirement. The requirements per phase are
@@ -174,6 +176,9 @@ python3 tools/dispatch.py work set --issue ENG-123 --pr 740 qa.verdict=approve q
 `--pr` defaults to the item's `pr`; it must be a positive integer and needs at
 least one `qa.*` field. See [Per-PR QA](../contract.md#per-pr-qa)
 for record lookup, legacy mirrors and migration.
+
+`work new` without `--plan` records the one plan whose name contains the key; see
+[Plan auto-detect](../contract.md#work-items-and-the-done-check).
 
 ## Herdr lanes
 
@@ -224,10 +229,50 @@ python3 tools/dispatch.py lanes [--issue ENG-123] [--stale-after 30]   # orchest
 python3 tools/dispatch.py claim --lane eng-123-frontend --release   # when done
 ```
 
+With `--pane` under `HERDR_ENV=1`, `work signal` renames the pane to
+`<issue> · <objective>`; `--no-rename` skips it. Failures only warn.
+
 Optional webhook: set `SECTORFIVE_WEBHOOK_URL` / `SECTORFIVE_WEBHOOK_TIMEOUT`
 in `plugin/.env` or the environment; failures only warn.
 See the contract's [Lane hooks](../contract.md#work-items-and-the-done-check)
 for naming, file layout and overlap rules.
+
+### Commands lanes run
+
+Every lane command is local or read-only to GitHub and never prompts:
+
+| Command | Used for | Exit codes |
+| --- | --- | --- |
+| `python3 <plugin>/tools/dispatch.py work signal --lane <l> --issue <k> --status <s> [--objective <t>] [--pane <id>] [--no-rename]` | status changes; renames the pane under `HERDR_ENV=1` | 0, 2 |
+| `… work set --issue <k> pr=<n>` / `--prs 20,21` / `--pr <n> qa.…` | record fields; `pr=` appends to `prs`, `--prs` replaces it | 0, 2 |
+| `… work show [--format json]` | read item state | 0, 2 |
+| `… claim --lane <l> --issue <k> --path <p>…` / `--release` | before editing / when done | 0, 2, 3 |
+| `… lanes [--issue <k>] [--stale-after 30]` | fan-in | 0, 2 |
+| `… merge-gate --issue <k> [--pr <n>] [--facts F]` | merge readiness | 0, 2, 4, 6, 7 |
+| `… done --issue <k> [--pr <n>]` | done check | 0, 2, 3, 4, 6, 7 |
+| `herdr agent …`, `herdr pane …` | lane control | herdr's |
+| `git …`, the repo's test command | build and verify | — |
+
+No dispatcher command exits 1, and none reads stdin. Example auto-review allow
+rule (adapt the syntax to your harness; the user installs it):
+
+```text
+allow: python3 */tools/dispatch.py work *
+allow: python3 */tools/dispatch.py claim *
+allow: python3 */tools/dispatch.py lanes*
+allow: python3 */tools/dispatch.py merge-gate *
+allow: python3 */tools/dispatch.py done *
+```
+
+`route`, `gate`, `check` and `outcome`/`report` are left out: they call the
+decision provider or feed recalibration, and stay with planning.
+
+A Codex lane checks its pin before the first step:
+
+```text
+/status            # model and effort must match the pin, e.g. gpt-6.1-sol @ high
+python3 <plugin>/tools/dispatch.py work signal --lane <l> --issue <k> --status failed --note "/status: <model @ effort>"   # on mismatch
+```
 
 ## Done check
 
@@ -260,8 +305,11 @@ except `version`, and only the checks listed under `checks` run. Without the
 file, the defaults are:
 
 ```json
-{ "version": 1, "checks": { "ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}, "mergeable": {} } }
+{ "version": 1, "checks": { "ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}, "mergeable": {}, "planLocal": {} } }
 ```
+
+Since v5.9 `planLocal` is a default: without `done.json`, `done` needs the
+item's plan on disk. Your own `done.json` opts out by leaving it out.
 
 A fuller example:
 
@@ -314,6 +362,7 @@ A fuller example:
 | `reviewThreads` | `ignoreOutdated` (bool, default false) | no unresolved review threads |
 | `botScore` | `author` (substring of the bot's login), `pattern` (regex with one capture group for the score), `min` (number), all required; `commitPattern` (regex capturing the SHA the bot says it reviewed) | the bot's latest score is at least `min` and is for the head commit. The reviewed commit comes from `commitPattern`, else from the review's own commit, else from comparing the comment's last edit with the head commit's time. No score yet, or a score for an older commit → pending. |
 | `mergeable` | `maxBehind` (integer, optional) | GitHub reports no conflicts with the base, and the head is at most `maxBehind` commits behind it when that is set. Still computing → pending. Set `maxBehind` when CI must have run against a recent base; leave it out in busy repos where every branch is always behind. |
+| `planLocal` | none | the work item's `plan` exists locally, resolved against the state checkout ([Relative paths](../contract.md#work-items-and-the-done-check)) |
 | `planFile` | `glob` (required; `{issue}` is replaced by the key), `caseInsensitive` (bool, default true) | a file on the PR's head commit matches |
 | `prBody` | `sections` (required list) | each name starts a line of the body, as a heading (`## Plan`), bold (`**Plan**`) or plain text (`Resolves ENG-123`) |
 | `qa` | none | that PR's own qa record has `approve` with `sha` equal to the PR head; see [Per-PR QA](../contract.md#per-pr-qa) for legacy fallback |
@@ -361,10 +410,13 @@ makes GitHub writes. Unless `--no-log`, it appends a `merge-gate` line to
 It runs offline by default: supply `--facts`, or enable GitHub reads with `--gh`
 or the config's `gh` key. See the contract's [Merge gate](../contract.md#merge-gate)
 for the `mergeGate` config table, facts shape, severity, score, stack and plan
-path rules.
+path rules, [Multi-PR items](../contract.md#multi-pr-items) and the qa report
+[Findings format](../contract.md#qa-review-format). Open findings count only
+when `maxThreadSeverity` is set.
 
 Exit codes: 0 pass; 4 fail (including BR0); 7 pending; 6 invalid or missing
 `mergeGate` config; 2 bad arguments, no inputs, bad facts or a `gh` error.
+There is no exit 1.
 
 ### Blast radius
 
@@ -382,7 +434,9 @@ and BR0 rule.
 | 4 | blocked — gate statement holds / not done or blocked (done) / advance refused (work) / fail, including BR0 (merge-gate) |
 | 5 | no credentials (check) |
 | 6 | invalid config.json or done.json (check, done) / invalid or missing `mergeGate` (merge-gate) |
-| 7 | pending — checks running or bot score not posted (done, merge-gate) |
+| 7 | pending — checks running or bot score not posted (done, merge-gate); stack facts missing for a multi-PR item (merge-gate) |
+
+No command exits 1.
 
 ## Outcome log
 

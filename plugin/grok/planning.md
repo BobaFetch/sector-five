@@ -53,6 +53,7 @@ When `HERDR_ENV=1`, run each role as a long-lived herdr lane; otherwise dispatch
 - Start a lane on demand: `herdr pane split --no-focus`, then `herdr agent start <issue>-<role> --kind <harness> --pane <pane id> -- <args>`, with harness, model and effort from the role pin and the dispatcher's tier. Parse IDs from herdr's JSON.
 - Reuse the lane for every later step of that issue and role. One issue per lane.
 - Fan out with `herdr agent prompt <lane> "..."` (no `--wait`), so other issues keep moving. Fan in with `herdr agent list` and `herdr agent wait <lane>`; read results with `herdr agent read <lane> --source recent-unwrapped`. No sleep or polling loops.
+- Name the workspace tab after the issue at setup; lanes keep pane labels current with `work signal --pane`. Lanes run only the [commands lanes run](../docs/runbook.md#commands-lanes-run), non-interactively. For a stack, see [Multi-PR items](../contract.md#multi-pr-items).
 - Lanes claim before editing, run `work signal` at each status change and release when done; you read `lanes` and release stale claims. See the runbook's [Lane hooks](../docs/runbook.md#lane-hooks) and the [contract](../contract.md#work-items-and-the-done-check).
 - A `blocked` lane: read it. Answer routine approvals yourself; send anything on the Dangerous actions list, or outside the plan, to the user.
 - Run issues in parallel only when their files do not overlap. Close only panes and workspaces you created, after `work advance --to merged`.

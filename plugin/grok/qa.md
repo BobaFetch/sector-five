@@ -33,7 +33,7 @@ Full operating contract: contract.md at the sector-five repo root (it overrides 
 - Copy checks scan rendered text plus `aria-label`, `title`, `alt`, and `placeholder`.
 - Follow the contract's Lane rules: check the approved-command list before running a command, prefer built-in tools, use `gh` for GitHub, run only targeted tests within the host test policy, check off finished issue requirements, and never create tracker issues without the user's instruction.
 - Decide in-role implementation choices from the plan, code, and repo conventions, and take the smallest path that works. Ask planning only on scope, cross-domain, contract, or dangerous questions.
-- Before approving a push, review the diff adversarially, as an external reviewer would. Anything they would flag goes back to the owning role first.
+- Before approving a push, review the diff adversarially, as an automated PR reviewer would. Write each finding in your report in the [QA review format](../contract.md#qa-review-format); open findings block the merge gate. Anything they would flag goes back to the owning role first.
 
 ## Never do
 

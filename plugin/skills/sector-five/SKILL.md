@@ -176,7 +176,8 @@ paths (planning routes the rest to the owning role), and watches the PR with `di
 
 Each issue in flight has a state file, `.sectorfive/work/<issue>.json`:
 
-- `dispatch.py work new --issue <key> --plan <path>` creates it in `planned`.
+- `dispatch.py work new --issue <key> [--plan <path>]` creates it in `planned`;
+  without `--plan` it records the one matching plan file.
 - `work set --issue <key> owner=frontend branch=... pr=...` records fields;
   qa records `work set --issue <key> --pr <n> qa.verdict=approve qa.sha=<head sha> qa.report=<path>`.
 - `work advance --issue <key> --to <phase>` moves planned → building → review →
@@ -194,6 +195,7 @@ the repo's judgment statements. Exit 0 done, 4 not done or blocked, 7 pending
 
 - Record qa per PR with `work set --pr`: [runbook](../../docs/runbook.md#work-items), [Per-PR QA contract](../../contract.md#per-pr-qa).
 - Get `merge-gate` pass before handing a PR to the user: [runbook](../../docs/runbook.md#merge-gate), [contract](../../contract.md#merge-gate).
+- Stacks: `prs` on the item, every PR needs its own qa: [Multi-PR items](../../contract.md#multi-pr-items). Lane commands and allow rule: [runbook](../../docs/runbook.md#commands-lanes-run).
 - Include the Blast radius line on every plan: [runbook](../../docs/runbook.md#blast-radius), [contract](../../contract.md#blast-radius).
 
 ## Dispatcher (decision models)

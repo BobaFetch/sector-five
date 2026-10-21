@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v5.8. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v5.9. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -191,6 +191,10 @@ A lane is one role working one issue. Lanes stay open between steps, so a role k
 - **One workspace per issue.** planning creates it with `herdr worktree create` (one git worktree per issue) and records it with `work set lane=<workspace id>`.
 - **Start a lane on demand.** `herdr pane split --no-focus` in the issue's workspace, then `herdr agent start <issue>-<role> --kind <harness> --pane <pane id> -- <args>`. The harness, model and effort come from the role's pin and the dispatcher's tier choice, as in Model policy. Lane names are lowercase (`eng-123-frontend`). Parse every ID from herdr's JSON output; never guess one.
 - **Per-issue planner lanes.** An orchestrator may run one `<issue>-planning` lane per issue in parallel. Each one changes only its own issue's work item and plan; the shared `dispatch-log.jsonl` is locked, so concurrent appends are safe.
+- **Tab and pane labels.** At workspace setup planning names the tab after the issue (`herdr tab rename <tab id> <issue>`). Pane labels follow the lane: `work signal --pane <id>` renames the pane (see Lane hooks).
+- **Non-interactive launch.** Lanes never wait on a prompt: harness args (`codex exec`, `herdr agent start … -- <args>`) never ask a TTY question, and `dispatch.py` never reads stdin. Its `gh` and `herdr` calls run with stdin from `/dev/null`; `gh` also gets `GH_PROMPT_DISABLED=1` and `GIT_TERMINAL_PROMPT=0`.
+- **Model check.** A Codex lane confirms its model and effort in `/status` before its first step. On a mismatch it stops with `work signal --status failed --note <what /status showed>`, and planning reads the lane after start.
+- **Approval-free commands.** The commands a lane runs, and an example allow rule for them, are in the runbook's [Commands lanes run](docs/runbook.md#commands-lanes-run). One rule covers them; `route`, `gate` and `check` stay with planning.
 - **Reuse lanes.** Later steps for the same issue and role go to the same lane. A lane never takes a second issue.
 - **Fan out, then fan in.** Send work with `herdr agent prompt <lane> "..."` without `--wait`, so planning can start other lanes. Then watch with `herdr agent list` and `herdr agent wait <lane>`, and read results with `herdr agent read <lane> --source recent-unwrapped`. Use `--wait` only for short exchanges. No sleep or polling loops.
 - **Blocked lanes.** When a lane is `blocked` on an approval or question, planning reads it. planning answers a routine approval itself (an approved command, a file edit inside the lane's ownership). Anything on the Dangerous actions list, or outside the plan, goes to the user.
@@ -313,20 +317,23 @@ Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, manage
 
 A lane runs `claim` before it edits files, runs `work signal` at every status change, and releases its claim (`claim --release`) when it finishes or hands off.
 
-- `work signal --lane <lane> --issue <key> --status starting|working|blocked|review|done|failed|idle [--objective <text>] [--pane <id>] [--sha <sha>] [--note <text>]` merges the given fields into the lane file, sets `ts` (UTC), appends the record to the lane log and prints it as one JSON line. The work item must exist. It warns when the lane has no claim, and exits 2 when the lane's claim is for another issue.
+- `work signal --lane <lane> --issue <key> --status starting|working|blocked|review|done|failed|idle [--objective <text>] [--pane <id>] [--sha <sha>] [--note <text>] [--no-rename]` merges the given fields into the lane file, sets `ts` (UTC), appends the record to the lane log and prints it as one JSON line. The work item must exist. It warns when the lane has no claim, and exits 2 when the lane's claim is for another issue.
+- **Pane rename.** With `--pane`, `HERDR_ENV=1` and no `--no-rename`, signal runs `herdr pane rename <pane> "<issue> · <objective>"` (the lane name when there is no objective; cut to 48 characters) when that pane's label changed. Labels are kept per pane in the lane file (`paneLabels`), so two lanes in one tab rename independently. Best effort: a missing `herdr`, a timeout (2 s) or a non-zero exit only warns, records no label and never changes the exit code.
 - **Webhook (optional).** `SECTORFIVE_WEBHOOK_URL` and `SECTORFIVE_WEBHOOK_TIMEOUT`, set in `plugin/.env` or the environment, POST each signal record as JSON. Failures only warn and never change the exit code. The timeout defaults to 2 s and is capped at 5 s; the URL is never printed or logged.
 - `lanes [--issue <key>] [--stale-after <minutes>]` prints `{"lanes": [...], "claims": [...], "errors": [...]}`. Each lane carries `stale: true` when its `ts` is older than `--stale-after` (default 30). Unreadable lane files are listed by file name in `errors` and the command still exits 0; `--issue` filters lanes and claims but not `errors`. A corrupt `claims.json` exits 2.
 - `claim --lane <lane> --issue <key> [--path <path>...]` records the lane's claim in `lanes/claims.json` and prints it as JSON; claiming again replaces the lane's claim. It exits 3 when another lane claims the same issue or an overlapping path: equal paths, one path inside the other's folder, a path matching the other's glob, or two globs where one fixed prefix (the text before the first `*`, `?` or `[`) starts with the other. `claim --lane <lane> --release` drops the claim, prints `released: true`, or `released: false` when there was none, and exits 0 either way. Both are logged to the lane log. Claims never expire on their own: the orchestrator reads `stale` from `lanes` and releases stale claims.
 
 | Phase | Entered when (enforced by `work advance`) |
 | --- | --- |
-| `planned` | `work new --issue <key> --plan <path>` |
+| `planned` | `work new --issue <key> [--plan <path>]` |
 | `building` | owner recorded; when the dispatcher is `on`, the step was routed or recorded unrouted with `--issue <key>` |
 | `review` | branch recorded |
 | `open` | PR recorded; qa `approve` recorded with the head SHA it reviewed |
 | `done` | the last `dispatch.py done` returned `done`, on the same SHA qa approved |
 | `merged` | after the user merges; appends the closeout line |
 | `blocked` | any time, with `--note` giving the reason |
+
+**Plan auto-detect.** Without `--plan`, `work new` looks in `<state dir>/plans/*.md` for a file name containing the issue key, matched case-insensitively on word boundaries (any character other than a letter or digit is a boundary, so `_eng-123_` matches). Exactly one match is recorded, relative to the checkout that owns the state dir. Zero or two or more matches warn and record `plan: null`. `--plan` always wins and is stored as typed.
 
 Phases advance one at a time. Moving back (for example `review` → `building` after a veto) is always allowed. Only planning advances phases; qa records its own verdict (`work set qa.verdict=approve qa.sha=<sha> qa.report=<path>`).
 
@@ -335,13 +342,24 @@ Phases advance one at a time. Moving back (for example `review` → `building` a
 - **Fact checks**, read from GitHub with `gh` and from the work item: CI, review threads, a review bot's score, mergeability, a plan file on the branch, PR body sections, qa's approve on the head SHA, draft state. A review bot's score counts only for the commit it reviewed. After a push, the check waits for a new score. A failed fact means `not_done` (exit 4); a running check or a missing bot score means `pending` (exit 7). The dispatcher is never asked to overrule a fact.
 - **Judgments**, which run only after every fact passes: statements the dispatcher scores (`noul`) against the evidence each one names (plan, PR, qa report, review comments, diff). A score at or above the statement's threshold means `blocked` (exit 4). If the dispatcher is unavailable, the verdict is `escalate` (exit 3) unless the repo chose `facts_only`.
 
-Each repo's owner sets the rules in `.sectorfive/done.json`: which fact checks run and with what options, and which judgments to ask with what thresholds. The file is validated strictly, so a typo fails `check` instead of silently weakening the gate. Without the file, the defaults are CI passed, review threads resolved, qa approve on head, not a draft, and no conflicts with the base. `docs/runbook.md` documents every option.
+Each repo's owner sets the rules in `.sectorfive/done.json`: which fact checks run and with what options, and which judgments to ask with what thresholds. The file is validated strictly, so a typo fails `check` instead of silently weakening the gate. Without the file, the defaults are CI passed, review threads resolved, qa approve on head, not a draft, no conflicts with the base, and the work item's plan file exists on disk (`planLocal`). `docs/runbook.md` documents every option.
+
+**Behaviour change (v5.9).** `planLocal` is a default fact, so in a repo without `done.json`, `done` fails until the item's `plan` exists locally. A repo's own `done.json` opts out by leaving `planLocal` out of `checks`. The gh `planFile` check stays opt-in: plans live in gitignored `.sectorfive/plans/`, not on the branch.
+
+**Relative paths.** A relative `qa.report` or `plan` resolves against the checkout that owns the state dir (the parent of `SECTORFIVE_STATE`), for both `done` and `merge-gate`. Behaviour change (v5.9): a `done` run from a worktree now reads the main checkout's copy, not the worktree's.
 
 Every `done` run is logged and stored on the work item. Comparing done verdicts with later review findings and follow-up fixes is how the judgment thresholds get calibrated.
 
 ### Per-PR QA
 
 qa's verdict is kept per PR under `qa.byPr["<pr>"]` (`verdict`, `sha`, `report`, `ts`), so stacked PRs on one issue don't overwrite each other's verdict. `work set --issue <key> [--pr <n>] qa.verdict=… qa.sha=… qa.report=…` writes the record for `--pr`, which defaults to the item's `pr`; `--pr` must be a positive integer and needs at least one `qa.*` field (exit 2 otherwise). The legacy fields `qa.verdict`, `qa.sha` and `qa.report` mirror the whole record of the latest write, so a write that omits `qa.sha` blanks the mirror's `sha`; re-recording an older PR moves the mirror back to that PR. Migration happens on the first PR write: an existing legacy record that has a verdict is copied into `byPr` under the item's `pr`. An item with no `pr` given `--pr` doesn't copy the legacy record, and the mirror then overwrites it. `done` and `advance` read the PR's own record, falling back to the legacy fields only when `byPr` is empty or the PR is the item's `pr`. `done --pr` takes only positive integers.
+
+### Multi-PR items
+
+An issue can carry a stack of PRs. `prs` is the list (additive; a legacy item without it reads as `[pr]`), and `pr` stays the current, top PR. `work set pr=N` sets `pr` and appends N to `prs` when new. `work set --prs 20,21` replaces the list, drops duplicates and always keeps the item's `pr`. `work show` lists `prs`.
+
+- **Merged.** `work advance --to merged` needs qa `approve` in each listed PR's own `qa.byPr` record; the top-level record is no fallback.
+- **Gate.** With more than one entry in `prs`, the gate checks every PR in the stack facts, whether or not `wholeStack` is set, each against its own qa record and its own QA report. It is `pending` (exit 7) when the facts have no `stack` or a listed PR is missing from them, unless a check already failed; a red PR fails it (exit 4). A single-PR item still follows `wholeStack`.
 
 ### Merge gate
 
@@ -352,7 +370,7 @@ qa's verdict is kept per PR under `qa.byPr["<pr>"]` (`verdict`, `sha`, `report`,
 | Key | Type | Default | Check |
 | --- | --- | --- | --- |
 | `minScore` | `{"author": <str>, "min": <number>}` | off | `score`: the bot's score for the head is ≥ `min`; missing or stale → pending |
-| `maxThreadSeverity` | `critical`\|`major`\|`minor`\|`nit` | off | `threads`: no unresolved, non-outdated thread above this severity |
+| `maxThreadSeverity` | `critical`\|`major`\|`minor`\|`nit` | off | `threads`: no unresolved, non-outdated thread or open qa finding above this severity |
 | `checksGreen` | bool | off | `checks`: every check on the head passed (`ci.preexisting` excused); running → pending |
 | `forbiddenPaths` | list of globs | off | `forbiddenPaths`: no changed file matches (`fnmatch`), each hit named |
 | `wholeStack` | bool | off | `stack`: every PR below this one in the stack passes too |
@@ -362,7 +380,7 @@ qa's verdict is kept per PR under `qa.byPr["<pr>"]` (`verdict`, `sha`, `report`,
 
 `blastRadius` always runs (see Blast radius). **Warning:** an empty `"mergeGate": {}` is valid and passes on qa approval and blast radius alone, with no score, thread, check or path rules. Set the rules the repo needs.
 
-**Exit codes:** 0 pass; 4 fail (including BR0); 7 pending; 6 invalid or missing `mergeGate` config; 2 bad arguments, no inputs, bad facts or a `gh` error. Any failed check fails the gate; otherwise any pending check makes it pending; otherwise it passes, as in `done`.
+**Exit codes:** 0 pass; 4 fail (including BR0); 7 pending; 6 invalid or missing `mergeGate` config; 2 bad arguments, no inputs, bad facts or a `gh` error. There is no exit 1. Any failed check fails the gate; otherwise any pending check makes it pending; otherwise it passes, as in `done`.
 
 **Inputs.** Offline by default: `--facts FILE` is the JSON shape `done` accepts (`pr`, `headSha`, `checks`, `threads`, `comments`, …) plus `changedFiles` (plain paths) and `stack: [<facts>, …]`, one full facts object per lower PR. Each PR needs a `headSha` and a distinct positive number. With `--gh` or `"gh": true` the facts come from `gh` reads only, and the stack is walked through each PR's base branch to the default branch, one open PR per base; an ambiguous base or a cycle is exit 2. Without `--facts` and without gh, the gate exits 2 "no inputs". `gh` is never called unless gh is enabled.
 
@@ -372,7 +390,9 @@ qa's verdict is kept per PR under `qa.byPr["<pr>"]` (`verdict`, `sha`, `report`,
 
 **Whole stack.** With `wholeStack`, the gate evaluates this PR and every PR below it; the verdict is `pass` only when all pass, a lower PR's failure is reported against that PR, and `stack` names the PRs to merge together. Lower PRs are rated from this issue's plan and qa-checked against this issue's records, so a BR0 plan fails the whole stack and a stack that contains another issue's PR fails qa.
 
-**Plan path.** The blast radius is read from the work item's `plan`, or `--plan`. A relative path, either way, resolves against the checkout that owns the state dir (the parent of `SECTORFIVE_STATE`), not the current directory, so the gate works from a worktree. A missing plan fails as "plan not found: <path>".
+**Plan path.** The blast radius is read from the work item's `plan`, or `--plan`, resolved as in [Relative paths](#work-items-and-the-done-check). A missing plan fails as "plan not found: <path>".
+
+**QA findings.** When `maxThreadSeverity` is set, the gate also reads each gated PR's recorded `qa.report` and counts its open findings as unresolved threads under the same threshold (reported as `qa: <path>:<line>`). The format and parsing rules are in [QA review format](#qa-review-format).
 
 ### Blast radius
 
@@ -439,7 +459,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 - [ ] Existing assertions still match the new behavior. Search the whole test tree (unit, integration, e2e, smoke) for the old values the diff changed: routes, URLs, copy, config keys, and redirect targets. Update or retire every stale assertion, not just the tests next to the diff.
 - [ ] Test doubles match the current code: a mock of a component or module mirrors its current props and exports. When a test breaks because the contract changed, assert the test's original intent against the new contract instead of restoring what was removed.
 - [ ] User-facing copy checks scan rendered text and the accessible attributes `aria-label`, `title`, `alt`, and `placeholder`.
-- [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human). Any finding they would raise is fixed through the owning role before push.
+- [ ] Adversarial pre-PR review: read the diff as an external reviewer would (bot or human), with findings in the [QA review format](#qa-review-format). Any finding they would raise is fixed through the owning role before push.
 - [ ] Baseline commands pass with no new warnings; browser/e2e validation done for user-facing flows.
 - [ ] Browser evidence for user-facing changes: a screenshot of every changed view at desktop and phone width, plus a short recording (GIF or video) of each changed interactive flow. Saved under `.sectorfive/evidence/<plan id>/` and handed to the delivering lane, which lists the paths in the PR (see Delivery).
 - [ ] PR within the size and role split rule (see Delivery), or the exception is declared in the plan.
@@ -449,9 +469,27 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 
 - [ ] Verdict given on a completed CI run for the current head SHA, and recorded on the work item with that SHA.
 
+### QA review format
+
+qa reviews a diff as an automated PR reviewer would and writes each finding into its report under a `## Findings` heading, one line each:
+
+```md
+## Findings
+- [major] src/api/orders.py:42 — cursor is not validated (open)
+- [nit] src/api/orders.py:50-52 — duplicated branch (wontfix)
+```
+
+- **Line format.** `- [critical|major|minor|nit|P0–P3] <path>:<line>[-<line>] <sep> <text> (open|fixed|wontfix)`. `P0`–`P3` map to critical, major, minor, nit. `<sep>` is an em dash, an en dash or ` - `.
+- **What blocks.** Only `open` findings, counted against `maxThreadSeverity`. A `wontfix` needs a reason in its text and planning's agreement. No report recorded means no findings.
+- **Fail closed.** Each of these counts as one open major finding: a `- ` line in a Findings section that doesn't match (unknown label, no `path:line`, missing or unknown status; warns with the file and line, shown as `qa: malformed`); a code fence left unclosed anywhere in the report (warns with the line it opened on, shown as `qa: unclosed fence`); and a recorded report that is missing or unreadable (shown as `qa: report unreadable`, with no separate warning). A recorded report with no Findings section only warns.
+- **Sections.** The heading matches `##` or `###`, case-insensitively, with optional trailing text (`## Findings (re-check)`). A section ends at the next heading of the same or a higher level; a nested `### Findings` doesn't reset it. Every Findings section in the report counts. Indented sub-bullets, continuation lines and prose are ignored. Fences follow CommonMark: ``` or `~~~`, closed only by the same character at least as long, with no info string.
+- **Known gap.** Use one heading level for Findings. A deeper `### Findings` after a `##` section has ended is ignored.
+
 **Veto conditions (any one blocks completion):** out-of-scope files touched; unplanned contract break; red or skipped verification; dangerous action without recorded approval; missing or false completion evidence; a step dispatched without routing while the dispatcher is `on` and the step is not marked unrouted. Vetos return to the owning agent via planning with cited reasons — never fixed forward by qa.
 
 ## Changelog
+
+- v5.9: small ports. `work signal` renames the lane's herdr pane (`--no-rename` skips; warn only), and planning names the tab at setup. Lanes launch non-interactively and `dispatch.py` never reads stdin (`gh`/`herdr` stdin from `/dev/null`, `GH_PROMPT_DISABLED=1`, `GIT_TERMINAL_PROMPT=0`); Codex lanes confirm their model in `/status`. The runbook lists the commands lanes run with an allow rule. `work new` auto-detects the plan. `planLocal` is a default done fact (behaviour change without `done.json`). Relative `qa.report` and `plan` paths resolve against the state checkout for `done` too (behaviour change in worktrees). Items carry `prs`; `merged` needs every PR's own qa; the gate checks the whole stack of a multi-PR item and is pending without stack facts. qa reports carry `## Findings`, and open findings count as threads in the gate. No new exit codes.
 
 - v5.8: merge gate. `merge-gate` reports pass (0), fail (4), pending (7), config error (6) or bad input (2) from the repo's `mergeGate` rules, offline from `--facts` or from `gh` reads; it never merges and makes no GitHub writes. Plans carry `Blast radius: BR<n> — <reason>`; BR0 blocks and escalates, and the gate fails it with `escalate: true`. qa records are per PR (`qa.byPr`, `work set --pr`), with the legacy fields mirroring the latest write.
 

@@ -249,3 +249,26 @@ the build and escalates before any code is written. Known gaps: the score
 pattern is built in and loose, every PR in a stack is rated from one plan and
 qa-checked against one issue, and an empty `mergeGate` passes on qa and blast
 radius alone.
+
+## 2026-10-20 — small ports: lanes, stacks, plan default, qa findings (contract v5.9)
+
+Lanes stalled on prompts, needed approvals for routine dispatcher calls, lost
+track of which pane was which, and stacked PRs had to be hand-edited onto one
+`pr`. `work signal` now keeps the pane label current (best effort, warn only)
+and every `gh`/`herdr` call runs with no stdin and prompts disabled, so one
+allow rule covers the commands lanes run; `route`, `gate` and `check` stay out
+because they call the decision provider. `prs` is additive and `pr` keeps its
+meaning, so older readers keep working. A stack merges as one unit, so
+`merged` and the gate need every PR's own qa record, with no fallback to the
+top-level one. Plans are local, so the new default fact is `planLocal`, not the
+gh `planFile` check; a repo's `done.json` opts out. Relative report and plan
+paths resolve against the state checkout for `done` as well as the gate, so a
+worktree and the main checkout agree. qa findings live in the local report,
+not as GitHub comments, so the gate stays write-free; anything it can't parse
+fails closed as a major (plan 010 Correction). No new exit codes.
+
+Known limits (in addition to v5.7 and v5.8's): a corrupt work-item JSON still
+crashes `work signal` with a traceback; fence lines indented 4+ spaces, and a
+backtick opener whose info string contains backticks, still count as fences;
+a deeper `### Findings` after a `##` Findings section has ended is ignored;
+`judgment_state` still opens the plan relative to the current directory.
