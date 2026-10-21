@@ -1438,6 +1438,8 @@ def judgment_state(issue, facts, item, sources, limit, pr=None):
     if "qa" in sources:
         report = qa_for(item, pr if pr is not None else
                         facts.get("pr", (item or {}).get("pr"))).get("report")
+        if report:
+            report = os.path.join(os.path.dirname(state_dir()), report)
         if report and os.path.isfile(report):
             with open(report) as fh:
                 parts.append("--- qa report ---\n" + fh.read())
@@ -1595,16 +1597,30 @@ def qa_finding_threads(item, pr, own_record=False):
             lines = fh.read().splitlines()
     except (OSError, UnicodeError):
         return [{"body": "major", "qa": "qa: report unreadable"}]
-    threads, in_findings = [], False
+    threads, findings_level, found_findings, fence = [], None, False, None
     for number, line in enumerate(lines, 1):
-        line = line.lstrip()
-        if line.startswith("## "):
-            in_findings = line.rstrip() == "## Findings"
+        marker = re.match(r"\s*(```|~~~)", line)
+        if fence:
+            if marker and marker.group(1) == fence:
+                fence = None
             continue
-        if not in_findings or not line.startswith("- "):
+        if marker:
+            fence = marker.group(1)
+            continue
+        if line[:1].isspace():
+            continue
+        heading = re.match(r"^(#{2,3})\s+findings\b.*$", line, re.I)
+        if heading:
+            findings_level, found_findings = len(heading.group(1)), True
+            continue
+        heading = re.match(r"^(#+)(?:\s|$)", line)
+        if heading and findings_level and len(heading.group(1)) <= findings_level:
+            findings_level = None
+            continue
+        if not findings_level or not line.startswith("- "):
             continue
         match = re.fullmatch(
-            r"- \[(critical|major|minor|nit|p[0-3])\] (.+?:\d+)\s+(?:—|–|-)\s+"
+            r"- \[(critical|major|minor|nit|p[0-3])\] (.+?:\d+(?:-\d+)?)\s+(?:—|–|-)\s+"
             r"(.+)\s+\((open|fixed|wontfix)\)", line.rstrip(), re.I)
         if not match:
             print("dispatch: warning: malformed QA finding in %s:%d" % (report, number),
@@ -1612,6 +1628,9 @@ def qa_finding_threads(item, pr, own_record=False):
             threads.append({"body": "major", "qa": "qa: malformed"})
         elif match.group(4).lower() == "open":
             threads.append({"body": match.group(1), "qa": "qa: " + match.group(2)})
+    if not found_findings:
+        print("dispatch: warning: no Findings section in QA report %s" % report,
+              file=sys.stderr)
     return threads
 
 
