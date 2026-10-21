@@ -1728,3 +1728,106 @@ class WebhookTest(LaneCase):
         code, err, _ = self.hook_signal("")
         self.assertNotIn("webhook", err)
         self.assert_no_secret()
+
+
+# --- merge-gate (plan 009) step 2: per-PR qa records ---
+
+class QaByPrTest(WorkRepoCase):
+    done = DoneCmdTest.done
+    write_facts, write_rules = DoneCmdTest.write_facts, DoneCmdTest.write_rules
+    LEGACY = {"issue": "ENG-1", "phase": "review", "plan": "p.md", "owner": "frontend",
+              "branch": "b", "pr": 12, "history": [],
+              "qa": {"verdict": "approve", "sha": "abc123def456", "report": "r.md"}}
+
+    def path(self):
+        return os.path.join(self.meta, "work", "ENG-1.json")
+
+    def setUp(self):
+        super().setUp()
+        self.facts_path = os.path.join(self.repo, "facts.json")
+        self.rules_path = os.path.join(self.repo, "rules.json")
+        self.write_facts(pr_facts())
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+        self.run_main(["work", "set", "--issue", "ENG-1", "owner=frontend", "branch=b", "pr=12"])
+
+    def write_item(self, item):
+        with open(self.path(), "w") as fh:
+            json.dump(item, fh)
+
+    def item(self):
+        with open(self.path()) as fh:
+            return json.load(fh)
+
+    def qa(self, *pairs, pr=None):
+        extra = ["--pr", str(pr)] if pr is not None else []
+        return self.run_main(["work", "set", "--issue", "ENG-1", *extra, *pairs])[0]
+
+    def test_legacy_migrates_on_first_pr_write(self):
+        self.write_item(self.LEGACY)
+        self.assertEqual(self.qa("qa.verdict=approve", "qa.sha=bbb", pr=13), 0)
+        qa = self.item()["qa"]
+        self.assertEqual(qa["byPr"]["12"], {"verdict": "approve", "sha": "abc123def456",
+                                            "report": "r.md"})
+        self.assertEqual((qa["byPr"]["13"]["sha"], qa["sha"]), ("bbb", "bbb"))
+
+    def test_read_paths_leave_files_byte_identical(self):
+        self.write_item(self.LEGACY)
+        with open(self.path(), "rb") as fh:
+            before = fh.read()
+        for argv in (["work", "show"], ["work", "show", "--format", "json"],
+                     ["work", "show", "--issue", "ENG-1"],
+                     ["work", "advance", "--issue", "ENG-1", "--to", "done"]):  # refused
+            self.run_main(argv)
+        with open(self.path(), "rb") as fh:
+            self.assertEqual(fh.read(), before)
+
+    def test_two_prs_separate_and_mirror_follows_latest_write(self):
+        self.qa("qa.verdict=approve", "qa.sha=aaa", "qa.report=a.md", pr=1)
+        self.qa("qa.verdict=veto", "qa.sha=bbb", "qa.report=b.md", pr=2)
+        qa = self.item()["qa"]
+        self.assertEqual((qa["byPr"]["1"]["sha"], qa["byPr"]["2"]["sha"]), ("aaa", "bbb"))
+        self.assertEqual((qa["verdict"], qa["sha"], qa["report"]), ("veto", "bbb", "b.md"))
+        self.qa("qa.verdict=approve", "qa.sha=aa2", pr=1)  # re-record older PR: mirror follows
+        qa = self.item()["qa"]
+        self.assertEqual((qa["verdict"], qa["sha"], qa["report"]), ("approve", "aa2", "a.md"))
+        self.assertEqual(qa["byPr"]["2"]["verdict"], "veto")
+        self.assertTrue(qa["byPr"]["1"]["ts"])
+
+    def test_item_without_pr_does_not_copy_legacy(self):
+        self.write_item(dict(self.LEGACY, pr=None))
+        self.qa("qa.verdict=approve", "qa.sha=ccc", pr=5)
+        qa = self.item()["qa"]
+        self.assertEqual(list(qa["byPr"]), ["5"])  # pinned: legacy record not migrated
+        self.assertEqual(qa["sha"], "ccc")
+
+    def test_no_pr_anywhere_writes_legacy_only(self):
+        self.write_item(dict(self.LEGACY, pr=None, qa={}))
+        self.qa("qa.verdict=approve", "qa.sha=ddd")
+        self.assertEqual(self.item()["qa"], {"verdict": "approve", "sha": "ddd"})
+
+    def test_bad_pr_exits_two(self):
+        for bad in ("0", "-1", "x", "1.5"):
+            with self.assertRaises(SystemExit) as ctx, mock.patch("sys.stderr", io.StringIO()):
+                self.qa("qa.verdict=approve", pr=bad)
+            self.assertEqual(ctx.exception.code, 2, bad)
+        self.assertEqual(self.qa("owner=qa", pr=3), 2)  # --pr needs a qa.* field
+
+    def test_done_and_advance_gate_on_the_items_pr(self):
+        self.write_rules({"version": 1, "checks": {"qa": {}}})
+        self.qa("qa.verdict=veto", "qa.sha=abc123def456", pr=99)  # other PR, latest write
+        self.qa("qa.verdict=approve", "qa.sha=abc123def456", pr=12)
+        self.qa("qa.verdict=veto", "qa.sha=zzz", pr=99)            # mirror now says veto
+        code, out, _ = self.done()
+        self.assertEqual((code, json.loads(out)["facts"]["qa"]["status"]), (0, "pass"))
+        for phase in ("building", "review", "open"):
+            self.assertEqual(self.run_main(["work", "advance", "--issue", "ENG-1",
+                                            "--to", phase])[0], 0)
+        self.qa("qa.verdict=veto", "qa.sha=abc123def456", pr=12)
+        self.qa("qa.verdict=approve", "qa.sha=abc123def456", pr=99)  # mirror approve
+        code, out, _ = self.done()
+        self.assertEqual((code, json.loads(out)["facts"]["qa"]["status"]), (4, "fail"))
+        code, out, _ = self.run_main(["work", "advance", "--issue", "ENG-1", "--to", "done"])
+        self.assertEqual(code, 4)
+        self.assertIn("qa", out)
+        code, out, _ = self.done("--pr", "99")
+        self.assertEqual(json.loads(out)["facts"]["qa"]["status"], "pass")

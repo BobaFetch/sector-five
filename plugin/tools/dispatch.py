@@ -726,6 +726,14 @@ def load_work(issue):
         return json.load(fh)
 
 
+def qa_for(item, pr):
+    qa = (item or {}).get("qa") or {}
+    by_pr = qa.get("byPr") or {}
+    if str(pr) in by_pr:
+        return by_pr[str(pr)]
+    return qa if not by_pr or pr == (item or {}).get("pr") else {}
+
+
 def save_work(item):
     path = work_path(item["issue"])
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -823,7 +831,7 @@ def transition_problems(item, target):
     if target in ("review", "open", "done", "merged") and not item.get("branch"):
         problems.append("no branch recorded")
     if target in ("open", "done", "merged"):
-        qa = item.get("qa") or {}
+        qa = qa_for(item, item.get("pr"))
         if not item.get("pr"):
             problems.append("no PR recorded")
         if qa.get("verdict") != "approve" or not qa.get("sha"):
@@ -833,11 +841,10 @@ def transition_problems(item, target):
         if done.get("verdict") != "done":
             problems.append("done check has not passed (run: done --issue %s)"
                             % item["issue"])
-        elif done.get("sha") != (item.get("qa") or {}).get("sha"):
+        elif done.get("sha") != qa.get("sha"):
             problems.append("done check ran on %s but qa approved %s; re-run both "
                             "on the current head" % ((done.get("sha") or "?")[:12],
-                                                     ((item.get("qa") or {}).get("sha")
-                                                      or "?")[:12]))
+                                                     (qa.get("sha") or "?")[:12]))
     return problems
 
 
@@ -883,11 +890,29 @@ def cmd_work(args):
     with locked(work_path(args.issue)):
         item = load_work(args.issue)
         if args.action == "set":
+            legacy_qa = dict(item.get("qa") or {})
+            qa_updates = {}
             for pair in args.pairs:
                 key, sep, raw = pair.partition("=")
                 if not sep:
                     raise RuntimeError("expected field=value, got %r" % pair)
-                set_field(item, key.strip(), raw.strip())
+                key = key.strip()
+                set_field(item, key, raw.strip())
+                if key.startswith("qa."):
+                    qa_updates[key[3:]] = item["qa"][key[3:]]
+            if args.pr is not None and not qa_updates:
+                raise RuntimeError("--pr requires at least one qa.* field")
+            pr = args.pr if args.pr is not None else item.get("pr")
+            if qa_updates and pr is not None:
+                qa = item["qa"]
+                by_pr = qa.setdefault("byPr", {})
+                fields = ("verdict", "sha", "report")
+                if not by_pr and legacy_qa.get("verdict") and item.get("pr") is not None:
+                    by_pr[str(item["pr"])] = {key: legacy_qa.get(key) for key in fields}
+                record = by_pr.setdefault(str(pr), {})
+                record.update(qa_updates)
+                record["ts"] = now()
+                qa.update({key: record.get(key) for key in fields})
             save_work(item)
             print("%s: updated %s" % (args.issue, ", ".join(
                 p.partition("=")[0].strip() for p in args.pairs)))
@@ -1198,7 +1223,7 @@ def fact(status, detail):
     return {"status": status, "detail": detail}
 
 
-def evaluate_facts(rules, facts, item):
+def evaluate_facts(rules, facts, item, pr=None):
     """Run the configured fact checks. Each result is pass, fail, or pending."""
     checks = rules.get("checks", {})
     results = {}
@@ -1275,7 +1300,8 @@ def evaluate_facts(rules, facts, item):
         results["prBody"] = fact("fail", "missing: " + ", ".join(missing)) if missing \
             else fact("pass", "all %d sections present" % len(checks["prBody"]["sections"]))
     if "qa" in checks:
-        qa = (item or {}).get("qa") or {}
+        qa = qa_for(item, pr if pr is not None else
+                    facts.get("pr", (item or {}).get("pr")))
         if qa.get("verdict") != "approve":
             results["qa"] = fact("fail", "no qa approve recorded")
         elif qa.get("sha") != facts.get("headSha"):
@@ -1305,7 +1331,7 @@ def evaluate_facts(rules, facts, item):
     return results
 
 
-def judgment_state(issue, facts, item, sources, limit):
+def judgment_state(issue, facts, item, sources, limit, pr=None):
     parts = ["Work item: %s" % issue]
     if "plan" in sources:
         plan = facts.get("planText")
@@ -1319,7 +1345,8 @@ def judgment_state(issue, facts, item, sources, limit):
         parts.append("--- pull request ---\n%s\n\n%s" % (facts.get("title", ""),
                                                         facts.get("body", "")))
     if "qa" in sources:
-        report = ((item or {}).get("qa") or {}).get("report")
+        report = qa_for(item, pr if pr is not None else
+                        facts.get("pr", (item or {}).get("pr"))).get("report")
         if report and os.path.isfile(report):
             with open(report) as fh:
                 parts.append("--- qa report ---\n" + fh.read())
@@ -1390,7 +1417,8 @@ def cmd_done(args):
     else:
         facts = gather_facts(pr, rules, args.issue)
     facts.setdefault("issue", args.issue)
-    results = evaluate_facts(rules, facts, item)
+    pr = args.pr if args.pr is not None else facts.get("pr", pr)
+    results = evaluate_facts(rules, facts, item, pr)
     statuses = {r["status"] for r in results.values()}
     judged = {}
     if "fail" in statuses:
@@ -1412,7 +1440,7 @@ def cmd_done(args):
         provider = None
         try:
             for sources, members in groups.items():
-                state = judgment_state(args.issue, facts, item, sources, limit)
+                state = judgment_state(args.issue, facts, item, sources, limit, pr)
                 provider, answers = ask(
                     state, {j["id"]: questions[j["id"]] for j in members},
                     args.provider, args.timeout)
@@ -1462,6 +1490,13 @@ def cmd_done(args):
                 print("%-18s %s" % (name, j))
         print("verdict: %s" % verdict.upper())
     return {"done": 0, "escalate": 3, "pending": 7}.get(verdict, 4)
+
+
+def positive_int(raw):
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
 
 
 def build_parser():
@@ -1540,6 +1575,7 @@ def build_parser():
     w_set = work_sub.add_parser("set", help="record fields: owner, branch, pr, plan, lane, "
                                             "qa.verdict, qa.sha, qa.report, ci.preexisting")
     w_set.add_argument("--issue", required=True)
+    w_set.add_argument("--pr", type=positive_int, help="PR number for the qa record")
     w_set.add_argument("pairs", nargs="+", metavar="field=value")
     w_adv = work_sub.add_parser("advance", help="move to a phase if its requirements hold")
     w_adv.add_argument("--issue", required=True)
