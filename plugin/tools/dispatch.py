@@ -629,7 +629,6 @@ def validate_lane_name(lane):
 def cmd_signal(args):
     validate_lane_name(args.lane)
     load_work(args.issue)
-    item_path = work_path(args.issue)
     directory = os.path.join(state_dir(), "lanes")
     claims = read_lane_json(os.path.join(directory, "claims.json"), [])
     claim = next((c for c in claims if c["lane"] == args.lane), None)
@@ -655,21 +654,23 @@ def cmd_signal(args):
         raise RuntimeError("lane state: %s" % type(exc).__name__) from None
     lane_webhook(record)
     if args.pane is not None and os.environ.get("HERDR_ENV") == "1" and not args.no_rename:
-        title = ("%s · %s" % (args.issue, record["objective"])
-                 if record.get("objective") else args.lane)[:48]
         try:
-            with locked(item_path):
-                item = read_lane_json(item_path, None)
-                if item is None or title != item.get("paneLabel"):
+            title = ("%s · %s" % (args.issue, record["objective"])
+                     if record.get("objective") else args.lane)[:48]
+            with locked(path):
+                lane_record = read_lane_json(path, {})
+                pane_labels = lane_record.get("paneLabels", {})
+                if title != pane_labels.get(args.pane):
                     proc = subprocess.run(["herdr", "pane", "rename", args.pane, title],
                                           stdin=subprocess.DEVNULL, capture_output=True,
                                           text=True, timeout=2)
                     if proc.returncode:
                         print("warning: herdr pane rename exited %s" % proc.returncode, file=sys.stderr)
-                    elif item is not None:
-                        item["paneLabel"] = title
-                        atomic_write(item_path, json.dumps(item, indent=2) + "\n")
-        except (OSError, subprocess.SubprocessError) as exc:
+                    else:
+                        pane_labels[args.pane] = title
+                        lane_record["paneLabels"] = pane_labels
+                        atomic_write(path, json.dumps(lane_record) + "\n")
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
             print("warning: herdr pane rename: %s" % type(exc).__name__, file=sys.stderr)
     print(text, end="")
     return 0
