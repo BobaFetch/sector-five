@@ -1598,6 +1598,7 @@ def qa_finding_threads(item, pr, own_record=False):
     except (OSError, UnicodeError):
         return [{"body": "major", "qa": "qa: report unreadable"}]
     threads, findings_level, found_findings, fence = [], None, False, None
+    fence_line, fence_in_findings = None, False
     for number, line in enumerate(lines, 1):
         marker = re.match(r"\s*(```|~~~)", line)
         if fence:
@@ -1606,6 +1607,7 @@ def qa_finding_threads(item, pr, own_record=False):
             continue
         if marker:
             fence = marker.group(1)
+            fence_line, fence_in_findings = number, findings_level is not None
             continue
         if line[:1].isspace():
             continue
@@ -1628,6 +1630,10 @@ def qa_finding_threads(item, pr, own_record=False):
             threads.append({"body": "major", "qa": "qa: malformed"})
         elif match.group(4).lower() == "open":
             threads.append({"body": match.group(1), "qa": "qa: " + match.group(2)})
+    if fence and fence_in_findings:
+        print("dispatch: warning: unclosed code fence in %s:%d" % (report, fence_line),
+              file=sys.stderr)
+        threads.append({"body": "major", "qa": "qa: unclosed fence"})
     if not found_findings:
         print("dispatch: warning: no Findings section in QA report %s" % report,
               file=sys.stderr)
