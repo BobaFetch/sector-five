@@ -2353,3 +2353,125 @@ def _gate_multi_pr_rulings(self):
 
 
 MergeGateTest.test_multi_pr_rulings = _gate_multi_pr_rulings
+
+
+# --- small-ports (plan 010) PR A3: open QA findings count as review threads ---
+
+class QaFindingsParseTest(WorkRepoCase):
+    def threads(self, text, newline="\n"):
+        with open("r.md", "w", newline="") as fh:
+            fh.write(text.replace("\n", newline))
+        item = {"pr": 12, "qa": {"verdict": "approve", "sha": "s", "report": "r.md"}}
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            got = dispatch.qa_finding_threads(item, 12)
+        return [(t["body"].lower(), t["qa"]) for t in got], err.getvalue()
+
+    def test_parsing_table(self):
+        cases = [
+            ("- [major] a.py:1 — x (open)", [("major", "qa: a.py:1")]),
+            ("- [Critical] a.py:1 – x (OPEN)", [("critical", "qa: a.py:1")]),
+            ("- [nit] a/b.py:22 - x - y (open)", [("nit", "qa: a/b.py:22")]),
+            ("- [P0] a.py:1 — x (open)", [("p0", "qa: a.py:1")]),
+            ("- [p3] a.py:1 — x (open)", [("p3", "qa: a.py:1")]),
+            ("- [major] a.py:1 — x (fixed)", []),
+            ("- [major] a.py:1 — x (wontfix)", []),
+            ("- [major] a.py:1 — x", [("major", "qa: malformed")]),  # missing status
+            ("- [major] a.py — x (open)", [("major", "qa: malformed")]),  # no line
+            ("- [blocker] a.py:1 — x (open)", [("major", "qa: malformed")]),
+            ("- [major] a.py:1 x (open)", [("major", "qa: malformed")]),  # no separator
+            ("- [major] a.py:1 — x (closed)", [("major", "qa: malformed")]),
+            ("Prose mentioning [major] a.py:1 — x (open).", []),
+            ("* [major] a.py:1 — x (open)", []),
+        ]
+        for line, want in cases:
+            self.assertEqual(self.threads("# R\n## Findings\n%s\n" % line)[0], want, line)
+
+    def test_section_bounds_and_line_endings(self):
+        open_line = "- [major] a.py:1 — x (open)"
+        before = "- [major] z.py:1 — x (open)\n## Findings\n"
+        self.assertEqual(self.threads(before + "- [nit] b.py:2 — y (open)\n## Next\n"
+                                      + open_line + "\n")[0], [("nit", "qa: b.py:2")])
+        crlf, _ = self.threads("## Findings\n" + open_line + "\n", newline="\r\n")
+        self.assertEqual(crlf, [("major", "qa: a.py:1")])
+        self.assertEqual(self.threads("## Findings\n\n" + open_line)[0][0][1], "qa: a.py:1")
+
+    def test_malformed_warns_on_stderr(self):
+        got, err = self.threads("## Findings\n- nope\n")
+        self.assertEqual(got, [("major", "qa: malformed")])
+        self.assertIn("warning: malformed QA finding in r.md:2", err)
+
+    def test_unreadable_and_absent_report(self):
+        item = {"pr": 12, "qa": {"verdict": "approve", "sha": "s", "report": "gone.md"}}
+        self.assertEqual(dispatch.qa_finding_threads(item, 12),
+                         [{"body": "major", "qa": "qa: report unreadable"}])
+        with open("bin.md", "wb") as fh:
+            fh.write(b"## Findings\n\xff\xfe\n")
+        item["qa"]["report"] = "bin.md"
+        self.assertEqual(dispatch.qa_finding_threads(item, 12)[0]["qa"], "qa: report unreadable")
+        item["qa"]["report"] = None
+        self.assertEqual(dispatch.qa_finding_threads(item, 12), [])
+
+
+def _write_report(path, *lines):
+    with open(path, "w") as fh:
+        fh.write("# QA\n## Findings\n" + "".join(l + "\n" for l in lines))
+
+
+def _gate_qa_findings_threshold(self):
+    self.run_main(["work", "set", "--issue", "ENG-1", "pr=12", "qa.verdict=approve",
+                   "qa.sha=abc123def456", "qa.report=r.md"])
+    for lines, code in ((["- [major] a.py:1 — x (open)"], 4),
+                        (["- [minor] a.py:1 — x (open)", "- [nit] b.py:2 — y (open)"], 0),
+                        (["- [critical] a.py:1 — x (fixed)", "- [P1] b.py:2 - y (wontfix)"], 0),
+                        (["- [P1] b.py:2 - y (open)"], 4)):
+        _write_report("r.md", *lines)
+        got, data, _ = self.gate()
+        self.assertEqual((got, data["checks"]["threads"]["status"]), (code, "pass" if code == 0
+                                                                     else "fail"), lines)
+    _write_report("r.md", "- [major] a.py:1 — x (open)")
+    self.assertIn("qa: a.py:1", self.gate()[1]["checks"]["threads"]["detail"])
+    _write_report("r.md", "- garbage")
+    code, data, err = self.gate()
+    self.assertEqual((code, data["checks"]["threads"]["detail"]), (4, "qa: malformed"))
+    self.assertIn("malformed QA finding", err)
+    os.remove("r.md")
+    self.assertEqual(self.gate()[1]["checks"]["threads"]["detail"], "qa: report unreadable")
+    self.gate_config({"checksGreen": True})  # findings only checked with maxThreadSeverity
+    self.assertEqual(self.gate()[0], 0)
+
+
+def _gate_qa_findings_with_gh_threads(self):
+    self.run_main(["work", "set", "--issue", "ENG-1", "pr=12", "qa.verdict=approve",
+                   "qa.sha=abc123def456", "qa.report=r.md"])
+    _write_report("r.md", "- [major] a.py:1 — x (open)")
+    threads = [{"body": "P1: bad", "resolved": False}, {"body": "critical", "resolved": True}]
+    code, data, _ = self.gate(gate_facts(threads=threads))
+    self.assertEqual((code, data["checks"]["threads"]["detail"]), (4, "major, qa: a.py:1"))
+    _write_report("r.md", "- [nit] a.py:1 — x (open)")
+    self.assertEqual(self.gate(gate_facts(threads=threads[1:]))[0], 0)
+
+
+def _gate_stack_reads_own_report_only(self):
+    self.run_main(["work", "set", "--issue", "ENG-1", "--prs", "11,12"])
+    self.run_main(["work", "set", "--issue", "ENG-1", "pr=12", "qa.verdict=approve",
+                   "qa.sha=abc123def456", "qa.report=top.md"])
+    _write_report("top.md", "- [major] top.py:1 — x (open)")
+    self.gate_config({"checksGreen": True, "maxThreadSeverity": "minor"})
+    lower = gate_facts(pr=11, sha="base0001")
+    code, data, _ = self.gate(gate_facts(stack=[lower]))
+    self.assertEqual((code, data["checks"]["threads"]["detail"]), (4, "qa: top.py:1"))
+    # PR 11 has no record of its own: it must not inherit top.md
+    self.assertEqual([s["checks"]["threads"]["status"] for s in data["stack"]], ["pass"])
+    _write_report("top.md")
+    self.run_main(["work", "set", "--issue", "ENG-1", "--pr", "11", "qa.verdict=approve",
+                   "qa.sha=base0001", "qa.report=low.md"])
+    _write_report("low.md", "- [major] low.py:3 — x (open)")
+    code, data, _ = self.gate(gate_facts(stack=[lower]))
+    self.assertEqual((code, data["stack"][0]["checks"]["threads"]["detail"]),
+                     (4, "qa: low.py:3"))
+    self.assertEqual(data["checks"]["threads"]["status"], "pass")
+
+
+MergeGateTest.test_qa_findings_threshold = _gate_qa_findings_threshold
+MergeGateTest.test_qa_findings_with_gh_threads = _gate_qa_findings_with_gh_threads
+MergeGateTest.test_stack_reads_own_report_only = _gate_stack_reads_own_report_only
