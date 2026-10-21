@@ -233,6 +233,29 @@ def load_config(path):
         raise ValueError("config version must be 1")
     if "evidence" in config and config["evidence"] != "local":
         raise ValueError("invalid evidence")
+    if "mergeGate" in config:
+        gate = config["mergeGate"]
+        kinds = {"minScore": dict, "maxThreadSeverity": str, "checksGreen": bool,
+                 "forbiddenPaths": list, "wholeStack": bool, "qaPerPr": bool,
+                 "minBlastRadius": str, "gh": bool}
+        if not isinstance(gate, dict) or set(gate) - set(kinds):
+            raise ValueError("invalid mergeGate keys or object")
+        for key, value in gate.items():
+            if type(value) is not kinds[key]:
+                raise ValueError("invalid mergeGate option type")
+        if "minScore" in gate:
+            score = gate["minScore"]
+            if (set(score) != {"author", "min"} or type(score["author"]) is not str
+                    or not score["author"].strip() or type(score["min"]) not in (int, float)
+                    or not float("-inf") < score["min"] < float("inf")):
+                raise ValueError("invalid mergeGate.minScore")
+        if ("maxThreadSeverity" in gate and gate["maxThreadSeverity"] not in
+                ("critical", "major", "minor", "nit")):
+            raise ValueError("invalid mergeGate.maxThreadSeverity")
+        if "minBlastRadius" in gate and not re.fullmatch(r"BR[0-4]", gate["minBlastRadius"]):
+            raise ValueError("invalid mergeGate.minBlastRadius")
+        if any(type(path) is not str for path in gate.get("forbiddenPaths", [])):
+            raise ValueError("invalid mergeGate.forbiddenPaths")
     dispatcher = config.get("dispatcher")
     if not isinstance(dispatcher, dict):
         raise ValueError("dispatcher must be an object")
@@ -731,7 +754,7 @@ def qa_for(item, pr):
     by_pr = qa.get("byPr") or {}
     if str(pr) in by_pr:
         return by_pr[str(pr)]
-    return qa if not by_pr or pr == (item or {}).get("pr") else {}
+    return qa if not by_pr or str(pr) == str((item or {}).get("pr")) else {}
 
 
 def save_work(item):
@@ -1082,7 +1105,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 }"""
 
 
-def gather_facts(pr, rules, issue):
+def gather_facts(pr, rules, issue, merge_gate=False):
     """Read what the done check needs about one PR from GitHub via gh."""
     view = json.loads(gh("pr", "view", str(pr), "--json",
                          "number,title,body,isDraft,headRefOid,baseRefName,"
@@ -1118,6 +1141,9 @@ def gather_facts(pr, rules, issue):
                      "body": ((t["comments"]["nodes"] or [{}])[0].get("body") or "")}
                     for t in nodes],
     }
+    if merge_gate:
+        facts["baseRefName"] = view["baseRefName"]
+        facts["changedFiles"] = [f["path"] for f in view.get("files") or []]
     checks = rules.get("checks", {})
     judgments = rules.get("judgments", [])
     if "mergeable" in checks:
@@ -1492,6 +1518,158 @@ def cmd_done(args):
     return {"done": 0, "escalate": 3, "pending": 7}.get(verdict, 4)
 
 
+def merge_gate_checks(config, facts, item, radius, plan_error=None):
+    """Reuse done's head checks, then apply the repo's merge-only facts."""
+    checks, names = {}, {"ci": "checks", "botScore": "score"}
+    if config.get("checksGreen"):
+        checks["ci"] = {"allowPreexisting": True}
+    if "minScore" in config:
+        checks["botScore"] = dict(config["minScore"], pattern=
+            r"(?i)(?:confidence[\s_-]*)?score[\s*_:#=-]*(\d+(?:\.\d+)?)")
+    if config.get("qaPerPr", True):
+        checks["qa"] = {}
+    normalized = dict(facts, checks=[c if c.get("status") in
+        ("success", "failure", "pending") else normalize_check(c)
+        for c in facts.get("checks", [])])
+    results = {names.get(k, k): v for k, v in
+               evaluate_facts({"checks": checks}, normalized, item, facts["pr"]).items()}
+    if "maxThreadSeverity" in config:
+        levels, blocked, unknown = ("nit", "minor", "major", "critical"), [], 0
+        for thread in facts.get("threads", []):
+            if thread.get("resolved") or thread.get("outdated"):
+                continue
+            body = thread.get("body", "")
+            leading = re.match(r'^(?:[\s*_`>\[!\"]|Badge\b)*(critical|major|minor|nit|p[0-3])\b',
+                               body, re.I)
+            tokens = [leading.group(1)] if leading else re.findall(
+                r"\b(critical|major|minor|nit|p[0-3])\b", body, re.I)
+            severities = [{"p0": "critical", "p1": "major", "p2": "minor",
+                           "p3": "nit"}.get(t.lower(), t.lower()) for t in tokens]
+            severity = max(severities, key=levels.index) if severities else "major"
+            unknown += not severities
+            if levels.index(severity) > levels.index(config["maxThreadSeverity"]):
+                blocked.append(severity if severities else "severity unknown")
+        results["threads"] = fact("fail", ", ".join(blocked)) if blocked else fact(
+            "pass", "no threads exceed the allowed severity" +
+            ("; %d severity unknown (treated as major)" % unknown if unknown else ""))
+    if "forbiddenPaths" in config:
+        hits = [p for p in facts.get("changedFiles", [])
+                if any(fnmatch.fnmatchcase(p, g) for g in config["forbiddenPaths"])]
+        results["forbiddenPaths"] = fact("fail", ", ".join(hits)) if hits else fact(
+            "pass", "no forbidden paths")
+    minimum = config.get("minBlastRadius")
+    if radius is None:
+        results["blastRadius"] = fact("fail", plan_error or "missing or invalid blast radius")
+    elif radius == "BR0":
+        results["blastRadius"] = fact("fail", "BR0: escalate to the orchestrator")
+    elif minimum and int(radius[-1]) < int(minimum[-1]):
+        results["blastRadius"] = fact("fail", "needs the user's explicit merge call")
+    else:
+        results["blastRadius"] = fact("pass", radius)
+    statuses = {r["status"] for r in results.values()}
+    return {"pr": facts["pr"], "headSha": facts.get("headSha"), "blastRadius": radius,
+            "escalate": radius == "BR0", "checks": results,
+            "verdict": "fail" if "fail" in statuses else
+                       "pending" if "pending" in statuses else "pass"}
+
+
+def gather_merge_stack(pr, config, issue):
+    """Read the base chain only; reject ambiguous links and cycles."""
+    facts = gather_facts(pr, {}, issue, merge_gate=True)
+    facts["stack"] = []
+    if config.get("wholeStack"):
+        default = json.loads(gh("repo", "view", "--json", "defaultBranchRef"))[
+            "defaultBranchRef"]["name"]
+        current, seen = facts, {str(facts["pr"])}
+        while current["baseRefName"] != default:
+            parents = json.loads(gh("pr", "list", "--head", current["baseRefName"],
+                                    "--state", "open", "--json", "number"))
+            if len(parents) != 1 or str(parents[0]["number"]) in seen:
+                raise RuntimeError("cannot resolve stack base chain")
+            current = gather_facts(parents[0]["number"], {}, issue, merge_gate=True)
+            seen.add(str(current["pr"]))
+            facts["stack"].append(current)
+    return facts
+
+
+def cmd_merge_gate(args):
+    try:
+        config = load_config(args.config or os.path.join(state_dir(), "config.json"))
+        if "mergeGate" not in config:
+            print("dispatch: error: no mergeGate config", file=sys.stderr)
+            return 6
+        config = config["mergeGate"]
+    except FileNotFoundError:
+        print("dispatch: error: no mergeGate config", file=sys.stderr)
+        return 6
+    except (OSError, ValueError):
+        print("dispatch: error: invalid config.json", file=sys.stderr)
+        return 6
+    try:
+        if args.facts is None and not (args.gh or config.get("gh")):
+            raise RuntimeError("no inputs")
+        item = load_work(args.issue)
+        pr = args.pr if args.pr is not None else item.get("pr")
+        if args.facts is not None:
+            with open(args.facts) as fh:
+                facts = json.load(fh)
+        elif pr is not None:
+            facts = gather_merge_stack(pr, config, args.issue)
+        else:
+            raise RuntimeError("no PR (pass --pr or work set pr=<n>)")
+        if not isinstance(facts, dict):
+            raise ValueError("facts must be an object")
+        facts.setdefault("pr", pr)
+        if args.pr is not None and str(facts["pr"]) != str(args.pr):
+            raise ValueError("facts PR does not match --pr")
+        lower = facts.get("stack", []) if config.get("wholeStack") else []
+        if not isinstance(lower, list):
+            raise ValueError("stack must be a list")
+        seen = set()
+        for entry in [facts, *lower]:
+            if (not isinstance(entry, dict) or not entry.get("headSha")
+                    or not str(entry.get("pr", "")).isdigit()
+                    or int(entry["pr"]) <= 0 or str(entry["pr"]) in seen):
+                raise ValueError("invalid or duplicate PR facts")
+            seen.add(str(entry["pr"]))
+        radius, plan, plan_error = None, args.plan or item.get("plan"), None
+        try:
+            path = os.path.join(os.path.dirname(state_dir()), plan) if plan else plan
+            with open(path) as fh:
+                header = "".join(fh.readline() for _ in range(10))
+            match = re.search(r"^Blast radius:\s*BR([0-4])\b", header, re.M)
+            radius = "BR" + match.group(1) if match else None
+        except FileNotFoundError:
+            plan_error = "plan not found: %s" % plan
+        except (OSError, TypeError, UnicodeError):
+            pass  # An unreadable local plan fails the blastRadius check.
+        decision = merge_gate_checks(config, facts, item, radius, plan_error)
+        decision["stack"] = [merge_gate_checks(config, f, item, radius, plan_error) for f in lower]
+        if config.get("wholeStack"):
+            statuses = {r["verdict"] for r in [decision, *decision["stack"]]}
+            verdict = "fail" if "fail" in statuses else "pending" if "pending" in statuses else "pass"
+            together = ", ".join("#%s" % r["pr"] for r in [decision, *decision["stack"]])
+            decision["checks"]["stack"] = fact(verdict, "PRs to merge together: " + together)
+            decision["verdict"] = verdict
+        if not args.no_log:
+            with locked(work_path(args.issue)):
+                item = load_work(args.issue)
+                item["mergeGate"] = dict(decision, ts=now())
+                save_work(item)
+                append_log(dict(decision, kind="merge-gate", issue=args.issue))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise RuntimeError("merge-gate inputs: %s" % type(exc).__name__) from None
+    if args.format == "json":
+        print(json.dumps(decision, indent=2))
+    else:
+        for record in [decision, *decision["stack"]]:
+            for name, result in record["checks"].items():
+                print("#%s %-18s %-7s %s" % (record["pr"], name,
+                      result["status"].upper(), result["detail"]))
+        print("verdict: " + decision["verdict"].upper())
+    return {"pass": 0, "pending": 7, "fail": 4}[decision["verdict"]]
+
+
 def positive_int(raw):
     value = int(raw)
     if value <= 0:
@@ -1562,11 +1740,20 @@ def build_parser():
     done = sub.add_parser("done", parents=[common],
                           help="check a work item against the repo's done rules")
     done.add_argument("--issue", required=True, help="work item key, e.g. ENG-123")
-    done.add_argument("--pr", type=int, help="PR number (default: the work item's)")
+    done.add_argument("--pr", type=positive_int, help="PR number (default: the work item's)")
     done.add_argument("--rules", help="rules path (default: .sectorfive/done.json, "
                                       "else the contract defaults)")
     done.add_argument("--facts", help="read PR facts from this JSON file instead of gh")
     done.set_defaults(func=cmd_done)
+    merge = sub.add_parser("merge-gate", help="report the repo's merge bar without GitHub writes")
+    merge.add_argument("--issue", required=True)
+    merge.add_argument("--pr", type=positive_int)
+    for option in ("facts", "plan", "config"):
+        merge.add_argument("--" + option)
+    merge.add_argument("--gh", action="store_true")
+    merge.add_argument("--no-log", action="store_true")
+    merge.add_argument("--format", choices=["text", "json"], default="text")
+    merge.set_defaults(func=cmd_merge_gate)
     work = sub.add_parser("work", help="per-issue work item state")
     work_sub = work.add_subparsers(dest="action", required=True)
     w_new = work_sub.add_parser("new", help="create a work item in phase planned")

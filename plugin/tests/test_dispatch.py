@@ -1831,3 +1831,191 @@ class QaByPrTest(WorkRepoCase):
         self.assertIn("qa", out)
         code, out, _ = self.done("--pr", "99")
         self.assertEqual(json.loads(out)["facts"]["qa"]["status"], "pass")
+
+
+# --- merge-gate (plan 009) step 4: merge-gate command, offline only ---
+
+def gate_facts(pr=12, sha="abc123def456", **overrides):
+    return dict(pr_facts(pr=pr, headSha=sha, changedFiles=["src/a.ts"],
+                         comments=[{"author": "coderabbitai", "body": "Score: 4"}],
+                         threads=[]), **overrides)
+
+
+class MergeGateTest(WorkRepoCase):
+    def setUp(self):
+        super().setUp()
+        self.cfg = os.path.join(self.repo, "c.json")
+        self.plan = os.path.join(self.repo, "p.md")
+        self.facts = os.path.join(self.repo, "f.json")
+        self.write_plan("Blast radius: BR2 — new command")
+        self.gate_config({"checksGreen": True, "maxThreadSeverity": "minor",
+                          "forbiddenPaths": [".github/workflows/**"],
+                          "minScore": {"author": "coderabbitai", "min": 4}})
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", self.plan])
+        for pr, sha in ((12, "abc123def456"), (11, "base0001")):
+            self.run_main(["work", "set", "--issue", "ENG-1", "--pr", str(pr),
+                           "qa.verdict=approve", "qa.sha=" + sha])
+        self.run_main(["work", "set", "--issue", "ENG-1", "pr=12"])
+        no_gh = mock.patch.object(dispatch, "gh", side_effect=AssertionError("gh called"))
+        no_run = mock.patch.object(dispatch.subprocess, "run",
+                                   side_effect=AssertionError("subprocess called"))
+        self.gh = no_gh.start()
+        no_run.start()
+        self.addCleanup(mock.patch.stopall)
+
+    def write_plan(self, header):
+        with open(self.plan, "w") as fh:
+            fh.write("# Plan\n%s\n" % header)
+
+    def gate_config(self, gate):
+        config = make_config()
+        if gate is not None:
+            config["mergeGate"] = gate
+        with open(self.cfg, "w") as fh:
+            json.dump(config, fh)
+
+    def gate(self, facts=None, *extra):
+        with open(self.facts, "w") as fh:
+            json.dump(facts or gate_facts(), fh)
+        code, out, err = self.run_main(["merge-gate", "--issue", "ENG-1", "--facts",
+                                        self.facts, "--config", self.cfg,
+                                        "--format", "json", *extra])
+        self.gh.assert_not_called()
+        return code, (json.loads(out) if out else None), err
+
+    def status(self, facts=None, check=None):
+        code, data, _ = self.gate(facts)
+        return code, data["checks"][check]["status"] if check else data["verdict"]
+
+    def test_pass_logs_and_records(self):
+        code, data, _ = self.gate()
+        self.assertEqual((code, data["verdict"], data["escalate"]), (0, "pass", False))
+        self.assertEqual(set(data["checks"]), {"checks", "score", "qa", "threads",
+                                               "forbiddenPaths", "blastRadius"})
+        with open(self.log_path()) as fh:
+            self.assertEqual(json.loads(fh.readlines()[-1])["kind"], "merge-gate")
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            self.assertEqual(json.load(fh)["mergeGate"]["verdict"], "pass")
+
+    def test_exit_six_and_two(self):
+        self.gate_config(None)
+        code, _, err = self.gate()
+        self.assertEqual(code, 6)
+        self.assertIn("no mergeGate config", err)
+        for bad in ({"typo": 1}, {"qaPerPr": "yes"}, {"maxThreadSeverity": "huge"},
+                    {"minBlastRadius": "BR5"}, {"minScore": {"author": "x"}}):
+            self.gate_config(bad)
+            self.assertEqual(self.gate()[0], 6, bad)
+        self.gate_config({})
+        code, _, err = self.run_main(["merge-gate", "--issue", "ENG-1", "--config", self.cfg])
+        self.assertEqual(code, 2)
+        self.assertIn("no inputs", err)
+        self.assertEqual(self.gate(gate_facts(), "--pr", "99")[0], 2)  # facts PR mismatch
+        self.assertEqual(self.gate(gate_facts(headSha=""))[0], 2)
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            self.gate(None, "--pr", "0")
+
+    def test_blast_radius(self):
+        for header, want in (("Blast radius: BR0 — prod data", "BR0: escalate"),
+                             ("no rating here", "missing"), ("Blast radius: BR5", "missing")):
+            self.write_plan(header)
+            code, data, _ = self.gate()
+            self.assertEqual((code, data["checks"]["blastRadius"]["status"]), (4, "fail"))
+            self.assertIn(want, data["checks"]["blastRadius"]["detail"])
+            self.assertEqual(data["escalate"], header.startswith("Blast radius: BR0"))
+        self.write_plan("Blast radius: BR1 — contract")
+        self.gate_config({"minBlastRadius": "BR2"})
+        self.assertEqual(self.status(check="blastRadius"), (4, "fail"))
+        self.gate_config({"minBlastRadius": "BR1"})
+        self.assertEqual(self.status(), (0, "pass"))
+
+    def test_thread_severity(self):
+        def thread(body, **kw):
+            return gate_facts(threads=[dict({"resolved": False, "outdated": False,
+                                             "author": "bot", "body": body}, **kw)])
+        for body, want in (("minor: rename", "pass"), ("nit: typo", "pass"),
+                           ("P2 badge", "pass"), ("P1 issue", "fail"), ("major bug", "fail"),
+                           ("critical!", "fail"), ("looks odd", "fail")):
+            self.assertEqual(self.status(thread(body), "threads")[1], want, body)
+        self.assertIn("severity unknown", self.gate(thread("looks odd"))[1]
+                      ["checks"]["threads"]["detail"])
+        self.assertEqual(self.status(thread("critical", resolved=True), "threads")[1], "pass")
+        self.assertEqual(self.status(thread("critical", outdated=True), "threads")[1], "pass")
+
+    def test_qa_per_pr_default_on_and_explicit_off(self):
+        self.run_main(["work", "set", "--issue", "ENG-1", "--pr", "12", "qa.verdict=veto"])
+        self.assertEqual(self.status(check="qa"), (4, "fail"))
+        self.gate_config({"qaPerPr": True})
+        self.assertEqual(self.status(check="qa"), (4, "fail"))
+        self.gate_config({"qaPerPr": False})
+        code, data, _ = self.gate()
+        self.assertEqual((code, "qa" in data["checks"]), (0, False))
+
+    def test_forbidden_paths_checks_and_score(self):
+        cases = ((gate_facts(changedFiles=[".github/workflows/ci.yml"]), "forbiddenPaths", 4, "fail"),
+                 (gate_facts(checks=[{"name": "t", "status": "failure"}]), "checks", 4, "fail"),
+                 (gate_facts(checks=[{"name": "t", "status": "IN_PROGRESS"}]), "checks", 7, "pending"),
+                 (gate_facts(comments=[{"author": "coderabbitai", "body": "Confidence Score: 3"}]),
+                  "score", 4, "fail"),
+                 (gate_facts(comments=[{"author": "coderabbitai", "body": "Rating 5/5"}]),
+                  "score", 7, "pending"))
+        for facts, check, code, want in cases:
+            self.assertEqual(self.status(facts, check), (code, want), check)
+
+    def test_stack_names_failing_pr(self):
+        self.gate_config({"wholeStack": True, "checksGreen": True})
+        red = gate_facts(pr=11, sha="base0001", checks=[{"name": "t", "status": "failure"}])
+        code, data, _ = self.gate(gate_facts(stack=[red]))
+        self.assertEqual((code, data["verdict"]), (4, "fail"))
+        self.assertEqual(data["checks"]["stack"]["detail"], "PRs to merge together: #12, #11")
+        self.assertEqual([(s["pr"], s["verdict"]) for s in data["stack"]], [(11, "fail")])
+        self.assertEqual(data["checks"]["checks"]["status"], "pass")  # top PR itself is green
+        code, data, _ = self.gate(gate_facts(stack=[gate_facts(pr=11, sha="base0001")]))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.gate(gate_facts(stack=[gate_facts(pr=12)]))[0], 2)  # duplicate
+
+    def test_done_pr_rejects_zero_and_negative(self):
+        for bad in ("0", "-3"):
+            with self.assertRaises(SystemExit) as ctx, mock.patch("sys.stderr", io.StringIO()):
+                self.run_main(["done", "--issue", "ENG-1", "--pr", bad])
+            self.assertEqual(ctx.exception.code, 2)
+
+    # --- re-check of 3170df9 ---
+    def test_relative_plan_from_worktree_via_state(self):
+        import tempfile
+        os.makedirs(os.path.join(self.repo, "plans"))
+        with open(os.path.join(self.repo, "plans", "rel.md"), "w") as fh:
+            fh.write("Blast radius: BR3 — one module\n")
+        self.run_main(["work", "set", "--issue", "ENG-1", "plan=plans/rel.md"])
+        worktree = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, worktree)
+        os.chdir(worktree)
+        state = {"SECTORFIVE_STATE": self.meta}
+        for extra in ([], ["--plan", "plans/rel.md"]):
+            with open(self.facts, "w") as fh:
+                json.dump(gate_facts(), fh)
+            code, out, _ = self.run_main(["merge-gate", "--issue", "ENG-1", "--facts", self.facts,
+                                          "--config", self.cfg, "--format", "json", *extra],
+                                         env=state)
+            self.assertEqual((code, json.loads(out)["blastRadius"]), (0, "BR3"), extra)
+
+    def test_plan_not_found(self):
+        code, data, _ = self.gate(None, "--plan", "nope/missing.md")
+        self.assertEqual(code, 4)
+        self.assertEqual(data["checks"]["blastRadius"]["detail"], "plan not found: nope/missing.md")
+
+    def test_leading_label_decides_severity(self):
+        def body(text):
+            return gate_facts(threads=[{"resolved": False, "outdated": False,
+                                        "author": "bot", "body": text}])
+        for text, want in (("nit: not critical, rename", "pass"), ("**[P3]** critical-ish", "pass"),
+                           ("critical: just a nit", "fail"), ("> Major: minor style", "fail")):
+            self.assertEqual(self.status(body(text), "threads")[1], want, text)
+
+    def test_no_merge_gate_message_missing_or_absent(self):
+        os.unlink(self.cfg)
+        for _ in range(2):
+            code, _, err = self.gate()
+            self.assertEqual(code, 6)
+            self.assertIn("no mergeGate config", err)
+            self.gate_config(None)
