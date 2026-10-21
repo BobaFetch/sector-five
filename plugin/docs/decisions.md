@@ -230,3 +230,22 @@ or a token in the URL can't break or leak from a lane. Claims don't expire on
 their own; the orchestrator decides what to release, since a timer could free
 files a slow lane is still writing. Known gaps: `lanes` doesn't check a lane
 file's name against the lane inside it, and `--issue` can't filter `errors`.
+
+## 2026-10-20 — merge gate, blast radius and per-PR QA (contract v5.8)
+
+The done check said whether a PR was ready for review hand-off, but nothing
+encoded a repo's merge rules, rated how much could go wrong, or kept stacked
+PRs' qa verdicts apart: each `work set qa.*` overwrote the last. qa records now
+live per PR in `qa.byPr`, with the legacy fields mirroring the latest write so
+existing readers keep working. `merge-gate` applies the repo's `mergeGate`
+rules and reports pass, fail or pending with reasons; it never merges and makes
+no GitHub writes, and it is offline unless gh is enabled. Exits reuse the
+existing codes (0, 4, 7, 6, 2); BR0 is a fail with `escalate: true` rather than
+a new code. `maxThreadSeverity` names the highest severity allowed, and a
+thread with unknown severity counts as major. `qaPerPr` is on by default
+because qa approval is a core gate condition (plan 009 Correction). Blast
+radius rates consequences, not effort, and doesn't change routing; BR0 stops
+the build and escalates before any code is written. Known gaps: the score
+pattern is built in and loose, every PR in a stack is rated from one plan and
+qa-checked against one issue, and an empty `mergeGate` passes on qa and blast
+radius alone.

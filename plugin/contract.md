@@ -1,6 +1,6 @@
 # Sector 5 — Team Operating Contract
 
-> v5.7. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
+> v5.8. Drop-in contract: any agent reads this file plus `.sectorfive/` and can work in an unfamiliar repo without guessing.
 
 ## Team
 
@@ -219,6 +219,7 @@ planning resolves each request by writing or amending a durable plan, re-sequenc
 ```md
 # Plan <id> — <goal>
 Owner: planning / Date: <date> / Status: <draft|active|done>
+Blast radius: BR<n> — <reason>
 ## Goal
 <one paragraph: the observable outcome that means completion>
 ## Scope
@@ -338,6 +339,51 @@ Each repo's owner sets the rules in `.sectorfive/done.json`: which fact checks r
 
 Every `done` run is logged and stored on the work item. Comparing done verdicts with later review findings and follow-up fixes is how the judgment thresholds get calibrated.
 
+**Per-PR QA.** qa's verdict is kept per PR under `qa.byPr["<pr>"]` (`verdict`, `sha`, `report`, `ts`), so stacked PRs on one issue don't overwrite each other's verdict. `work set --issue <key> [--pr <n>] qa.verdict=… qa.sha=… qa.report=…` writes the record for `--pr`, which defaults to the item's `pr`; `--pr` must be a positive integer and needs at least one `qa.*` field (exit 2 otherwise). The legacy fields `qa.verdict`, `qa.sha` and `qa.report` mirror the whole record of the latest write, so a write that omits `qa.sha` blanks the mirror's `sha`; re-recording an older PR moves the mirror back to that PR. Migration happens on the first PR write: an existing legacy record that has a verdict is copied into `byPr` under the item's `pr`. An item with no `pr` given `--pr` doesn't copy the legacy record, and the mirror then overwrites it. `done` and `advance` read the PR's own record, falling back to the legacy fields only when `byPr` is empty or the PR is the item's `pr`. `done --pr` takes only positive integers.
+
+### Merge gate
+
+`dispatch.py merge-gate --issue <key> [--pr <n>] [--facts FILE] [--plan PATH] [--config PATH] [--gh] [--no-log] [--format text|json]` reports whether a PR may be handed to the user to merge: `pass`, `fail` or `pending`, with a reason per check. **The gate never merges and makes no GitHub writes.** It is not read-only: unless `--no-log`, it stores the decision as `mergeGate` on the work item and appends a `merge-gate` line to `dispatch-log.jsonl`.
+
+**Config.** The rules are the `mergeGate` object in `.sectorfive/config.json` (or `--config PATH`), validated strictly: an unknown key or a wrong type is `invalid config.json`, exit 6. A missing config file, or a config without `mergeGate`, is `no mergeGate config`, exit 6. Every key except `qaPerPr` is off when absent.
+
+| Key | Type | Default | Check |
+| --- | --- | --- | --- |
+| `minScore` | `{"author": <str>, "min": <number>}` | off | `score`: the bot's score for the head is ≥ `min`; missing or stale → pending |
+| `maxThreadSeverity` | `critical`\|`major`\|`minor`\|`nit` | off | `threads`: no unresolved, non-outdated thread above this severity |
+| `checksGreen` | bool | off | `checks`: every check on the head passed (`ci.preexisting` excused); running → pending |
+| `forbiddenPaths` | list of globs | off | `forbiddenPaths`: no changed file matches (`fnmatch`), each hit named |
+| `wholeStack` | bool | off | `stack`: every PR below this one in the stack passes too |
+| `qaPerPr` | bool | **on** | `qa`: qa `approve` on each gated PR's head, from that PR's own record; only an explicit `false` turns it off |
+| `minBlastRadius` | `BR0`–`BR4` | off | a plan rated riskier (lower number) fails with "needs the user's explicit merge call" |
+| `gh` | bool | off | read facts from GitHub, like `--gh` |
+
+`blastRadius` always runs (see Blast radius). **Warning:** an empty `"mergeGate": {}` is valid and passes on qa approval and blast radius alone, with no score, thread, check or path rules. Set the rules the repo needs.
+
+**Exit codes:** 0 pass; 4 fail (including BR0); 7 pending; 6 invalid or missing `mergeGate` config; 2 bad arguments, no inputs, bad facts or a `gh` error. Any failed check fails the gate; otherwise any pending check makes it pending; otherwise it passes, as in `done`.
+
+**Inputs.** Offline by default: `--facts FILE` is the JSON shape `done` accepts (`pr`, `headSha`, `checks`, `threads`, `comments`, …) plus `changedFiles` (plain paths) and `stack: [<facts>, …]`, one full facts object per lower PR. Each PR needs a `headSha` and a distinct positive number. With `--gh` or `"gh": true` the facts come from `gh` reads only, and the stack is walked through each PR's base branch to the default branch, one open PR per base; an ambiguous base or a cycle is exit 2. Without `--facts` and without gh, the gate exits 2 "no inputs". `gh` is never called unless gh is enabled.
+
+**Thread severity.** A thread's severity comes from its first comment. A leading label or badge decides it (`nit:`, `**Major**`, `[P3]`, `> Critical`; `P0`–`P3` map to critical, major, minor, nit). Without one, the highest of those keywords anywhere in the comment counts. A thread blocks only when its severity is strictly above `maxThreadSeverity`, so `"minor"` lets minor and nit threads through. A thread with no recognisable severity counts as major and is reported as "severity unknown". A comment opening with a callout such as `[!NOTE]` falls back to the keyword search.
+
+**Review score.** `minScore` uses a built-in pattern, `score: <n>` (case-insensitive, optionally `confidence score`, with `:`, `=`, `#`, `-` or `*` between). Comments by `author` are scanned in order and the last match wins, so a comment quoting an old score can be picked up. A bot that writes its score in another format shows `pending`, never `pass`.
+
+**Whole stack.** With `wholeStack`, the gate evaluates this PR and every PR below it; the verdict is `pass` only when all pass, a lower PR's failure is reported against that PR, and `stack` names the PRs to merge together. Lower PRs are rated from this issue's plan and qa-checked against this issue's records, so a BR0 plan fails the whole stack and a stack that contains another issue's PR fails qa.
+
+**Plan path.** The blast radius is read from the work item's `plan`, or `--plan`. A relative path, either way, resolves against the checkout that owns the state dir (the parent of `SECTORFIVE_STATE`), not the current directory, so the gate works from a worktree. A missing plan fails as "plan not found: <path>".
+
+### Blast radius
+
+Every plan carries one header line in its first 10 lines: `Blast radius: BR<n> — <reason>` (read with `^Blast radius:\s*BR([0-4])\b`). Blast radius rates consequences, not effort: the difficulty score still rates how hard the work is, and blast radius doesn't change `route` or tier selection.
+
+- **BR4:** docs, tests or plans only.
+- **BR3:** one module, no contract or state change.
+- **BR2:** a new command or a compatible schema or CLI extension.
+- **BR1:** the contract, state format, security, CI or release path.
+- **BR0:** irreversible or outside the repo (data loss, secrets, production, money), or the plan can't bound it.
+
+**BR0 rule.** Planning comments on the tracker issue, sets the issue to blocked, runs `work advance --to blocked --note <reason>`, stops all lanes for the issue and escalates to the orchestrator. No build starts. The merge gate is the last line of defence: it fails BR0 with `escalate: true` (exit 4). A missing or invalid rating also fails the gate.
+
 ### Communication rules
 
 - Agents coordinate through planning, not directly — no agent-to-agent assignments.
@@ -405,6 +451,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 
 ## Changelog
 
+- v5.8: merge gate. `merge-gate` reports pass (0), fail (4), pending (7), config error (6) or bad input (2) from the repo's `mergeGate` rules, offline from `--facts` or from `gh` reads; it never merges and makes no GitHub writes. Plans carry `Blast radius: BR<n> — <reason>`; BR0 blocks and escalates, and the gate fails it with `escalate: true`. qa records are per PR (`qa.byPr`, `work set --pr`), with the legacy fields mirroring the latest write.
 - v5.7: orchestrator hooks. Lanes are `<issue>-<role>` (no `.tmp`, `claims` reserved, exit 2) with `lanes/<lane>.json` and a `.jsonl` log under the state dir. `work signal` records and prints lane state and may POST it to an optional webhook (`SECTORFIVE_WEBHOOK_URL`, `SECTORFIVE_WEBHOOK_TIMEOUT`; warn only, 2 s default, 5 s cap, URL never logged). `lanes` prints lanes with `stale`, claims and `errors`. `claim` guards issues and paths (exit 3 on conflict), `claim --release` reports `released`; claims never expire on their own.
 
 - v5.6: concurrency. `SECTORFIVE_STATE` points worktrees at the main checkout's `.sectorfive/`; an empty value, a missing folder or a file is a hard error (exit 2) for every command; unset uses the current checkout. Work-item writes and log appends are locked with `fcntl.flock` sidecar `.lock` files (work item, then log) and work items are written atomically; POSIX only, not for network filesystems. An orchestrator may run one `<issue>-planning` lane per issue.
