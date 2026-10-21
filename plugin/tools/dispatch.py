@@ -1600,9 +1600,10 @@ def qa_finding_threads(item, pr, own_record=False):
     threads, findings_level, found_findings, fence = [], None, False, None
     fence_line = None
     for number, line in enumerate(lines, 1):
-        marker = re.match(r"\s*(```|~~~)", line)
+        marker = re.match(r"\s*(`{3,}|~{3,})(.*)$", line)
         if fence:
-            if marker and marker.group(1) == fence:
+            if (marker and marker.group(1)[0] == fence[0]
+                    and len(marker.group(1)) >= len(fence) and not marker.group(2).strip()):
                 fence = None
             continue
         if marker:
@@ -1612,7 +1613,7 @@ def qa_finding_threads(item, pr, own_record=False):
         if line[:1].isspace():
             continue
         heading = re.match(r"^(#{2,3})\s+findings\b.*$", line, re.I)
-        if heading:
+        if heading and findings_level is None:
             findings_level, found_findings = len(heading.group(1)), True
             continue
         heading = re.match(r"^(#+)(?:\s|$)", line)
