@@ -771,7 +771,8 @@ def save_work(item):
 def new_work(issue, plan):
     if plan is None:
         matches = [path for path in glob.glob(os.path.join(state_dir(), "plans", "*.md"))
-                   if issue.casefold() in os.path.basename(path).casefold()
+                   if re.search(r"(?<![a-z0-9])" + re.escape(issue) + r"(?![a-z0-9])",
+                                os.path.basename(path), re.I)
                    and os.path.isfile(path)]
         if len(matches) == 1:
             plan = os.path.relpath(matches[0], os.path.dirname(state_dir()))
@@ -1098,7 +1099,8 @@ def gh(*argv):
     try:
         proc = subprocess.run(["gh", *argv], capture_output=True, text=True,
                               timeout=60, stdin=subprocess.DEVNULL,
-                              env=dict(os.environ, GH_PROMPT_DISABLED="1"))
+                              env=dict(os.environ, GH_PROMPT_DISABLED="1",
+                                       GIT_TERMINAL_PROMPT="0"))
     except FileNotFoundError:
         raise RuntimeError("the done check reads PR facts with the gh CLI; "
                            "install it or pass --facts")
