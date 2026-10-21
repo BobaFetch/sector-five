@@ -629,6 +629,7 @@ def validate_lane_name(lane):
 def cmd_signal(args):
     validate_lane_name(args.lane)
     load_work(args.issue)
+    item_path = work_path(args.issue)
     directory = os.path.join(state_dir(), "lanes")
     claims = read_lane_json(os.path.join(directory, "claims.json"), [])
     claim = next((c for c in claims if c["lane"] == args.lane), None)
@@ -657,11 +658,17 @@ def cmd_signal(args):
         title = ("%s · %s" % (args.issue, record["objective"])
                  if record.get("objective") else args.lane)[:48]
         try:
-            proc = subprocess.run(["herdr", "pane", "rename", args.pane, title],
-                                  stdin=subprocess.DEVNULL, capture_output=True,
-                                  text=True, timeout=2)
-            if proc.returncode:
-                print("warning: herdr pane rename exited %s" % proc.returncode, file=sys.stderr)
+            with locked(item_path):
+                item = read_lane_json(item_path, None)
+                if item is None or title != item.get("paneLabel"):
+                    proc = subprocess.run(["herdr", "pane", "rename", args.pane, title],
+                                          stdin=subprocess.DEVNULL, capture_output=True,
+                                          text=True, timeout=2)
+                    if proc.returncode:
+                        print("warning: herdr pane rename exited %s" % proc.returncode, file=sys.stderr)
+                    elif item is not None:
+                        item["paneLabel"] = title
+                        atomic_write(item_path, json.dumps(item, indent=2) + "\n")
         except (OSError, subprocess.SubprocessError) as exc:
             print("warning: herdr pane rename: %s" % type(exc).__name__, file=sys.stderr)
     print(text, end="")
@@ -884,6 +891,7 @@ def transition_problems(item, target):
         if not item.get("pr"):
             problems.append("no PR recorded")
         if target == "merged" and "prs" in item:
+            # Each PR needs its own QA record; deliberately no top-level qa / qa_for fallback.
             for pr in item["prs"]:
                 review = (item.get("qa") or {}).get("byPr", {}).get(str(pr)) or {}
                 if review.get("verdict") != "approve" or not review.get("sha"):
@@ -896,9 +904,7 @@ def transition_problems(item, target):
         if done.get("verdict") != "done":
             problems.append("done check has not passed (run: done --issue %s)"
                             % item["issue"])
-        elif (done.get("sha") != qa.get("sha") and
-              (target != "merged" or "prs" not in item
-               or str(item.get("pr")) in {str(pr) for pr in item["prs"]})):
+        elif done.get("sha") != qa.get("sha"):
             problems.append("done check ran on %s but qa approved %s; re-run both "
                             "on the current head" % ((done.get("sha") or "?")[:12],
                                                      (qa.get("sha") or "?")[:12]))
@@ -953,14 +959,21 @@ def cmd_work(args):
                 item["prs"] = args.prs
             legacy_qa = dict(item.get("qa") or {})
             qa_updates = {}
+            prs_changed = args.prs is not None
             for pair in args.pairs:
                 key, sep, raw = pair.partition("=")
                 if not sep:
                     raise RuntimeError("expected field=value, got %r" % pair)
                 key = key.strip()
                 set_field(item, key, raw.strip())
+                if key == "pr":
+                    prs_changed = True
                 if key.startswith("qa."):
                     qa_updates[key[3:]] = item["qa"][key[3:]]
+            if prs_changed and type(item.get("pr")) is int and item["pr"] > 0:
+                prs = item.setdefault("prs", [])
+                if item["pr"] not in prs:
+                    prs.append(item["pr"])
             if args.pr is not None and not qa_updates:
                 raise RuntimeError("--pr requires at least one qa.* field")
             pr = args.pr if args.pr is not None else item.get("pr")
@@ -1660,6 +1673,9 @@ def cmd_merge_gate(args):
         if args.facts is None and not (args.gh or config.get("gh")):
             raise RuntimeError("no inputs")
         item = load_work(args.issue)
+        multi_pr = len(item.get("prs", [])) > 1
+        if multi_pr:
+            config = dict(config, wholeStack=True)
         pr = args.pr if args.pr is not None else item.get("pr")
         if args.facts is not None:
             with open(args.facts) as fh:
@@ -1702,11 +1718,15 @@ def cmd_merge_gate(args):
             together = ", ".join("#%s" % r["pr"] for r in [decision, *decision["stack"]])
             decision["checks"]["stack"] = fact(verdict, "PRs to merge together: " + together)
             decision["verdict"] = verdict
-        if len(item.get("prs", [])) > 1 and not facts.get("stack"):
-            decision["checks"]["stack"] = fact(
-                "pending", "stack facts missing for prs " + ", ".join(map(str, item["prs"])))
-            if decision["verdict"] != "fail":
-                decision["verdict"] = "pending"
+        if multi_pr:
+            missing = [pr for pr in item["prs"] if str(pr) not in seen]
+            if not facts.get("stack") or missing:
+                detail = ("stack facts missing for prs " + ", ".join(map(str, item["prs"]))
+                          if not facts.get("stack") else
+                          "; ".join("stack missing PR %s" % pr for pr in missing))
+                decision["checks"]["stack"] = fact("pending", detail)
+                if decision["verdict"] != "fail":
+                    decision["verdict"] = "pending"
         if not args.no_log:
             with locked(work_path(args.issue)):
                 item = load_work(args.issue)
@@ -1735,7 +1755,7 @@ def positive_int(raw):
 
 def pr_list(raw):
     try:
-        return [positive_int(part.strip()) for part in raw.split(",")]
+        return list(dict.fromkeys(positive_int(part.strip()) for part in raw.split(",")))
     except (ValueError, argparse.ArgumentTypeError):
         raise argparse.ArgumentTypeError("must be comma-separated positive integers") from None
 
