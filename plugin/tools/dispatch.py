@@ -6,16 +6,20 @@ Stdlib-only. Reads keys from the environment or a gitignored `plugin/.env`
 
 Exit codes:
   0  routed or override (route) / proceed (gate) / ready or off (check) /
-     recorded (unrouted) / done (done) / ok (work)
-  2  usage, provider, validation, or lane/claim state error (message on stderr)
+     recorded (unrouted, outcome) / summary (report) / done (done) / pass
+     (merge-gate) / ok (work, lanes, claim)
+  2  usage, provider, validation, or lane/claim state error; merge-gate bad args,
+     no inputs or gh error (message on stderr)
   3  escalate to the user (route confidence below threshold, --expect mismatch
      below --trust, or done judgments unavailable under onUnavailable "escalate") /
      claim conflict (claim)
   4  blocked (gate statement holds at or above threshold) / not done or blocked
-     (done) / transition refused (work advance)
+     (done) / transition refused (work advance) / fail, incl. BR0 (merge-gate)
   5  no credentials (check)
-  6  invalid config.json or done.json (check, route, done)
-  7  pending (done: checks still running or a bot score not posted yet)
+  6  invalid config.json or done.json (check, route, done); invalid or missing
+     mergeGate config (merge-gate)
+  7  pending (done: checks still running or a bot score not posted yet;
+     merge-gate: a check or score pending)
 """
 import argparse
 import contextlib

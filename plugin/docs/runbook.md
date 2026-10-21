@@ -165,6 +165,16 @@ An empty value (`pr=`) clears a field. `work advance --to <phase>` refuses
 in the contract's Work items section. `work show --format json` prints the
 raw state.
 
+qa records its verdict for each PR:
+
+```sh
+python3 tools/dispatch.py work set --issue ENG-123 --pr 740 qa.verdict=approve qa.sha=<head sha> qa.report=<path>
+```
+
+`--pr` defaults to the item's `pr`; it must be a positive integer and needs at
+least one `qa.*` field. See [Per-PR QA](../contract.md#per-pr-qa)
+for record lookup, legacy mirrors and migration.
+
 ## Herdr lanes
 
 When planning runs inside a herdr pane (`HERDR_ENV=1`), roles run as
@@ -306,7 +316,7 @@ A fuller example:
 | `mergeable` | `maxBehind` (integer, optional) | GitHub reports no conflicts with the base, and the head is at most `maxBehind` commits behind it when that is set. Still computing → pending. Set `maxBehind` when CI must have run against a recent base; leave it out in busy repos where every branch is always behind. |
 | `planFile` | `glob` (required; `{issue}` is replaced by the key), `caseInsensitive` (bool, default true) | a file on the PR's head commit matches |
 | `prBody` | `sections` (required list) | each name starts a line of the body, as a heading (`## Plan`), bold (`**Plan**`) or plain text (`Resolves ENG-123`) |
-| `qa` | none | the work item has qa `approve` with `qa.sha` equal to the PR head |
+| `qa` | none | that PR's own qa record has `approve` with `sha` equal to the PR head; see [Per-PR QA](../contract.md#per-pr-qa) for legacy fallback |
 | `draft` | none | the PR is not a draft |
 
 **Judgments** (up to 64), asked only when every check passes:
@@ -336,17 +346,43 @@ typo can't quietly weaken the gate. Run `dispatch.py check` after editing.
 each judgment's score. Compare them with what happened later (review findings
 after `done`, follow-up fixes, reopened issues) and adjust per repo.
 
+## Merge gate
+
+Run `merge-gate` and get `pass` before telling the user a PR is ready to merge:
+
+```sh
+python3 tools/dispatch.py merge-gate --issue ENG-123 [--pr 740] [--facts facts.json] [--plan PATH] [--config PATH] [--gh] [--no-log] [--format text|json]
+```
+
+The gate reports `pass`, `fail` or `pending` with reasons. It never merges or
+makes GitHub writes. Unless `--no-log`, it appends a `merge-gate` line to
+`dispatch-log.jsonl` and records `mergeGate` on the work item.
+
+It runs offline by default: supply `--facts`, or enable GitHub reads with `--gh`
+or the config's `gh` key. See the contract's [Merge gate](../contract.md#merge-gate)
+for the `mergeGate` config table, facts shape, severity, score, stack and plan
+path rules.
+
+Exit codes: 0 pass; 4 fail (including BR0); 7 pending; 6 invalid or missing
+`mergeGate` config; 2 bad arguments, no inputs, bad facts or a `gh` error.
+
+### Blast radius
+
+Every plan needs `Blast radius: BR<n> — <reason>` in its first 10 lines.
+See the contract's [Blast radius](../contract.md#blast-radius) for the scale
+and BR0 rule.
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| 0 | routed or override (route) / proceed (gate) / ready or off (check) / recorded (unrouted) / done (done) / ok (work) |
-| 2 | usage or provider/probe error (stderr explains) |
+| 0 | routed or override (route) / proceed (gate) / ready or off (check) / recorded (unrouted) / done (done) / pass (merge-gate) / ok (work) |
+| 2 | usage, provider, validation, or lane/claim state error; merge-gate bad args, no inputs or gh error (stderr explains) |
 | 3 | escalate — confidence too low, `--expect` mismatch below `--trust`, or done judgments unavailable |
-| 4 | blocked — gate statement holds / not done or blocked (done) / advance refused (work) |
+| 4 | blocked — gate statement holds / not done or blocked (done) / advance refused (work) / fail, including BR0 (merge-gate) |
 | 5 | no credentials (check) |
-| 6 | invalid config.json or done.json (check, done) |
-| 7 | pending — checks running or bot score not posted (done) |
+| 6 | invalid config.json or done.json (check, done) / invalid or missing `mergeGate` (merge-gate) |
+| 7 | pending — checks running or bot score not posted (done, merge-gate) |
 
 ## Outcome log
 

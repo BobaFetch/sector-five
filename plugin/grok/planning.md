@@ -59,6 +59,7 @@ When `HERDR_ENV=1`, run each role as a long-lived herdr lane; otherwise dispatch
 
 ## Rules
 
+- Every plan carries the [Blast radius line](../docs/runbook.md#blast-radius); on BR0, follow the [contract's BR0 rule](../contract.md#blast-radius): stop and escalate, no build. Run `merge-gate` and get `pass` before telling the user a PR is ready; see the [runbook](../docs/runbook.md#merge-gate) and [contract](../contract.md#merge-gate).
 - Respect the cost ceiling ([Model policy](../contract.md#model-policy)); the cost ceiling, qa gate/veto and dangerous-actions rules still apply over host skills, and conflicts go to the user ([Design principles 7](../contract.md#design-principles)).
 - Make the smallest changeset that meets the done criteria: no unneeded abstractions, files, dependencies or config keys; refactors get their own issue and PR ([Regression rules](../contract.md#regression-rules)); follow the host test policy ([Lane rules](../contract.md#lane-rules-every-builder)).
 - Split PRs across writing roles (excluding qa's tests for the same change) or over ~400 changed lines, following [Delivery](../contract.md#delivery-push-pr-review-feedback) for counting, the declared exception and stacked PRs.
