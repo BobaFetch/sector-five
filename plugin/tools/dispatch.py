@@ -1518,7 +1518,7 @@ def cmd_done(args):
     return {"done": 0, "escalate": 3, "pending": 7}.get(verdict, 4)
 
 
-def merge_gate_checks(config, facts, item, radius):
+def merge_gate_checks(config, facts, item, radius, plan_error=None):
     """Reuse done's head checks, then apply the repo's merge-only facts."""
     checks, names = {}, {"ci": "checks", "botScore": "score"}
     if config.get("checksGreen"):
@@ -1538,8 +1538,11 @@ def merge_gate_checks(config, facts, item, radius):
         for thread in facts.get("threads", []):
             if thread.get("resolved") or thread.get("outdated"):
                 continue
-            tokens = re.findall(r"\b(critical|major|minor|nit|p[0-3])\b",
-                                thread.get("body", ""), re.I)
+            body = thread.get("body", "")
+            leading = re.match(r'^(?:[\s*_`>\[!\"]|Badge\b)*(critical|major|minor|nit|p[0-3])\b',
+                               body, re.I)
+            tokens = [leading.group(1)] if leading else re.findall(
+                r"\b(critical|major|minor|nit|p[0-3])\b", body, re.I)
             severities = [{"p0": "critical", "p1": "major", "p2": "minor",
                            "p3": "nit"}.get(t.lower(), t.lower()) for t in tokens]
             severity = max(severities, key=levels.index) if severities else "major"
@@ -1556,7 +1559,7 @@ def merge_gate_checks(config, facts, item, radius):
             "pass", "no forbidden paths")
     minimum = config.get("minBlastRadius")
     if radius is None:
-        results["blastRadius"] = fact("fail", "missing or invalid blast radius")
+        results["blastRadius"] = fact("fail", plan_error or "missing or invalid blast radius")
     elif radius == "BR0":
         results["blastRadius"] = fact("fail", "BR0: escalate to the orchestrator")
     elif minimum and int(radius[-1]) < int(minimum[-1]):
@@ -1596,6 +1599,9 @@ def cmd_merge_gate(args):
             print("dispatch: error: no mergeGate config", file=sys.stderr)
             return 6
         config = config["mergeGate"]
+    except FileNotFoundError:
+        print("dispatch: error: no mergeGate config", file=sys.stderr)
+        return 6
     except (OSError, ValueError):
         print("dispatch: error: invalid config.json", file=sys.stderr)
         return 6
@@ -1626,16 +1632,19 @@ def cmd_merge_gate(args):
                     or int(entry["pr"]) <= 0 or str(entry["pr"]) in seen):
                 raise ValueError("invalid or duplicate PR facts")
             seen.add(str(entry["pr"]))
-        radius, plan = None, args.plan or item.get("plan")
+        radius, plan, plan_error = None, args.plan or item.get("plan"), None
         try:
-            with open(plan) as fh:
+            path = os.path.join(os.path.dirname(state_dir()), plan) if plan else plan
+            with open(path) as fh:
                 header = "".join(fh.readline() for _ in range(10))
             match = re.search(r"^Blast radius:\s*BR([0-4])\b", header, re.M)
             radius = "BR" + match.group(1) if match else None
+        except FileNotFoundError:
+            plan_error = "plan not found: %s" % plan
         except (OSError, TypeError, UnicodeError):
             pass  # An unreadable local plan fails the blastRadius check.
-        decision = merge_gate_checks(config, facts, item, radius)
-        decision["stack"] = [merge_gate_checks(config, f, item, radius) for f in lower]
+        decision = merge_gate_checks(config, facts, item, radius, plan_error)
+        decision["stack"] = [merge_gate_checks(config, f, item, radius, plan_error) for f in lower]
         if config.get("wholeStack"):
             statuses = {r["verdict"] for r in [decision, *decision["stack"]]}
             verdict = "fail" if "fail" in statuses else "pending" if "pending" in statuses else "pass"
