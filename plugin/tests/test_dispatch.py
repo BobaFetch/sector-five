@@ -2145,3 +2145,115 @@ class SmallPortsTest(WorkRepoCase):
             dispatch.gh("api", "x")
         env = run.call_args.kwargs["env"]
         self.assertEqual((env["GIT_TERMINAL_PROMPT"], env["GH_PROMPT_DISABLED"]), ("0", "1"))
+
+
+# --- small-ports (plan 010) PR A2: pane rename, prs, merged per PR, gate stack pending ---
+
+class PaneRenameTest(LaneCase):
+    def rename(self, *extra, herdr="1", returncode=0, error=None):
+        proc = mock.Mock(returncode=returncode, stdout="", stderr="")
+        run = mock.Mock(side_effect=error) if error else mock.Mock(return_value=proc)
+        env = {"HERDR_ENV": herdr} if herdr else {}
+        with mock.patch.object(dispatch.subprocess, "run", run):
+            code, _, err = self.signal("eng-1-qa", "ENG-1", "working", *extra, env=env)
+        return code, run, err
+
+    def test_renames_with_issue_and_objective_capped(self):
+        code, run, _ = self.rename("--pane", "p1", "--objective", "x" * 80)
+        self.assertEqual(code, 0)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["herdr", "pane", "rename", "p1"])
+        self.assertEqual(argv[4], ("ENG-1 · " + "x" * 80)[:48])
+        self.assertEqual(len(argv[4]), 48)
+        self.assertIs(run.call_args.kwargs["stdin"], dispatch.subprocess.DEVNULL)
+        self.assertTrue(0 < run.call_args.kwargs["timeout"] <= 5)
+        code, run, _ = self.rename("--pane", "p1")  # objective kept from last signal
+        self.assertTrue(run.call_args.args[0][4].startswith("ENG-1 · x"))
+
+    def test_lane_name_without_objective(self):
+        self.assertEqual(self.rename("--pane", "p1")[1].call_args.args[0][4], "eng-1-qa")
+
+    def test_skipped_outside_herdr_without_pane_or_no_rename(self):
+        for extra, herdr in ((["--pane", "p1"], None), (["--pane", "p1"], "0"), ([], "1"),
+                             (["--pane", "p1", "--no-rename"], "1")):
+            code, run, _ = self.rename(*extra, herdr=herdr)
+            self.assertEqual(code, 0)
+            run.assert_not_called()
+
+    def test_failed_rename_only_warns(self):
+        code, _, err = self.rename("--pane", "p1", returncode=1)
+        self.assertEqual(code, 0)
+        self.assertIn("warning: herdr pane rename exited 1", err)
+        for error in (FileNotFoundError(), dispatch.subprocess.TimeoutExpired("herdr", 2)):
+            code, _, err = self.rename("--pane", "p1", error=error)
+            self.assertEqual(code, 0)
+            self.assertIn("warning: herdr pane rename: %s" % type(error).__name__, err)
+
+
+class PrsMergedTest(WorkRepoCase):
+    def setUp(self):
+        super().setUp()
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+
+    def item(self):
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            return json.load(fh)
+
+    def test_set_prs_and_bad_values(self):
+        code, out, _ = self.run_main(["work", "set", "--issue", "ENG-1", "--prs", "20, 21"])
+        self.assertEqual((code, self.item()["prs"]), (0, [20, 21]))
+        self.assertIn("updated prs", out)
+        for bad in ("0", "-1", "a", "20,", "", "1.5"):
+            with self.assertRaises(SystemExit) as ctx, mock.patch("sys.stderr", io.StringIO()):
+                self.run_main(["work", "set", "--issue", "ENG-1", "--prs", bad])
+            self.assertEqual(ctx.exception.code, 2, bad)
+        self.assertEqual(self.run_main(["work", "set", "--issue", "ENG-1"])[0], 2)
+        self.assertEqual(self.item()["prs"], [20, 21])
+
+    def merged_problems(self, by_pr, legacy=None):
+        qa = dict(legacy or {}, byPr={str(k): {"verdict": "approve", "sha": "s%d" % k}
+                                      for k in by_pr})
+        item = {"issue": "ENG-1", "phase": "done", "plan": "p.md", "owner": "qa",
+                "branch": "b", "pr": 21, "prs": [20, 21], "qa": qa,
+                "done": {"verdict": "done", "sha": "s21"}}
+        return [p for p in dispatch.transition_problems(item, "merged") if "for PR" in p]
+
+    def test_merged_reads_each_listed_pr(self):
+        self.assertEqual(self.merged_problems([1, 20, 21]), [])
+        problems = self.merged_problems([1, 20])  # PR 1 placeholder ignored
+        self.assertEqual(len(problems), 1)
+        self.assertIn("for PR 21", problems[0])
+        legacy = {"verdict": "approve", "sha": "s21"}  # top-level record must not count
+        self.assertIn("for PR 21", self.merged_problems([20], legacy)[0])
+
+    def test_merged_cli_exit_four(self):
+        item = self.item()
+        item.update(phase="done", owner="qa", branch="b", pr=21, prs=[20, 21],
+                    qa={"verdict": "approve", "sha": "s21", "byPr": {
+                        "1": {"verdict": "approve", "sha": "s1"},
+                        "20": {"verdict": "approve", "sha": "s20"}}},
+                    done={"verdict": "done", "sha": "s21"})
+        with open(os.path.join(self.meta, "work", "ENG-1.json"), "w") as fh:
+            json.dump(item, fh)
+        code, out, _ = self.run_main(["work", "advance", "--issue", "ENG-1", "--to", "merged"])
+        self.assertEqual(code, 4)
+        self.assertIn("for PR 21", out)
+
+
+def _gate_pending_without_stack_facts(self):
+    self.run_main(["work", "set", "--issue", "ENG-1", "--prs", "11,12"])
+    for whole in (False, True):
+        self.gate_config({"wholeStack": whole, "checksGreen": True})
+        code, data, _ = self.gate()
+        self.assertEqual((code, data["verdict"], data["checks"]["stack"]["status"]),
+                         (7, "pending", "pending"), whole)
+        self.assertIn("stack facts missing", data["checks"]["stack"]["detail"])
+        red = gate_facts(checks=[{"name": "t", "status": "failure"}])
+        self.assertEqual(self.gate(red)[0], 4, whole)  # fail beats pending
+    lower = gate_facts(pr=11, sha="base0001")
+    self.assertEqual(self.gate(gate_facts(stack=[lower]))[0], 0)
+    red_lower = gate_facts(pr=11, sha="base0001", checks=[{"name": "t", "status": "failure"}])
+    self.assertEqual(self.gate(gate_facts(stack=[red_lower]))[0], 4)
+
+
+MergeGateTest.test_pending_without_stack_facts = _gate_pending_without_stack_facts
