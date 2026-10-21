@@ -2475,3 +2475,75 @@ def _gate_stack_reads_own_report_only(self):
 MergeGateTest.test_qa_findings_threshold = _gate_qa_findings_threshold
 MergeGateTest.test_qa_findings_with_gh_threads = _gate_qa_findings_with_gh_threads
 MergeGateTest.test_stack_reads_own_report_only = _gate_stack_reads_own_report_only
+
+
+class QaFindingsParseFixTest(WorkRepoCase):
+    """A3 re-check: fences, heading case/level, section end, sub-bullets, ranges."""
+    L = "- [major] a.py:1 — x (open)\n"
+    threads = QaFindingsParseTest.threads
+
+    def test_fixes_table(self):
+        L, ex = self.L, "- [major] e.py:9 — example (open)\n"
+        cases = [
+            ("## Findings\n```\n## x\n" + ex + "```\n" + L, ["qa: a.py:1"]),
+            ("## Findings\n```md\n" + ex + "```\n" + L, ["qa: a.py:1"]),
+            ("## Findings\n~~~\n## x\n" + ex + "~~~\n" + L, ["qa: a.py:1"]),
+            ("## findings\n" + L, ["qa: a.py:1"]),
+            ("### FINDINGS (re-check 2)\n" + L, ["qa: a.py:1"]),
+            ("#### Findings\n" + L, []),
+            ("## Findings\n" + L + "# Next\n" + ex, ["qa: a.py:1"]),
+            ("## Findings\n" + L + "## Next\n" + ex, ["qa: a.py:1"]),
+            ("### Findings\n" + L + "## Next\n" + ex, ["qa: a.py:1"]),
+            ("## Findings\n#### Sub\n" + L, ["qa: a.py:1"]),
+            ("## Findings\n" + L + "  - detail\n    more text\n", ["qa: a.py:1"]),
+            ("## Findings\n- [nit] a.py:1-3 — x (open)\n", ["qa: a.py:1-3"]),
+        ]
+        for text, want in cases:
+            got, err = self.threads(text)
+            self.assertEqual([q for _, q in got], want, text)
+            self.assertNotIn("malformed", err, text)
+
+    def test_no_section_only_warns(self):
+        got, err = self.threads("# QA\nall good\n")
+        self.assertEqual(got, [])
+        self.assertIn("warning: no Findings section in QA report r.md", err)
+        self.assertNotIn("no Findings", self.threads("## Findings\n")[1])
+
+    def test_unclosed_fence_counts_once_anywhere(self):
+        L = self.L
+        for text, line in (("```\n## Findings\n" + L, 1),
+                           ("## Findings\n" + L + "```\n" + L + "```\n```py\n", 6),
+                           ("## Findings\n" + L + "## Next\n~~~\n", 4),
+                           ("# QA\n\n```\nno section\n", 3)):
+            got, err = self.threads(text)
+            self.assertEqual([q for _, q in got].count("qa: unclosed fence"), 1, text)
+            self.assertIn(("major", "qa: unclosed fence"), got)
+            self.assertIn("unclosed code fence in r.md:%d" % line, err)
+        self.assertEqual(self.threads("## Findings\n```\n" + L + "```\n")[0], [])
+
+
+def _gate_unclosed_fence_exits_four(self):
+    self.run_main(["work", "set", "--issue", "ENG-1", "pr=12", "qa.verdict=approve",
+                   "qa.sha=abc123def456", "qa.report=r.md"])
+    _write_report("r.md", "- [nit] a.py:1 — x (open)", "```")
+    code, data, err = self.gate()
+    self.assertEqual((code, data["checks"]["threads"]["detail"]), (4, "qa: unclosed fence"))
+    self.assertIn("unclosed code fence", err)
+
+
+MergeGateTest.test_unclosed_fence_exits_four = _gate_unclosed_fence_exits_four
+
+
+class DoneRelativeReportTest(WorkRepoCase):
+    def test_relative_report_resolved_against_state_checkout(self):
+        os.makedirs(os.path.join(self.repo, "ev"))
+        with open(os.path.join(self.repo, "ev", "r.md"), "w") as fh:
+            fh.write("## Findings\nREPORT-BODY\n")
+        item = {"pr": 12, "qa": {"verdict": "approve", "sha": "s", "report": "ev/r.md"}}
+        other = os.path.join(self.repo, "elsewhere")
+        os.mkdir(other)
+        os.chdir(other)
+        with mock.patch.dict(os.environ, {"SECTORFIVE_STATE": self.meta}):
+            state = dispatch.judgment_state("ENG-1", {"pr": 12}, item, ["qa"], 10000)
+            self.assertEqual(dispatch.qa_finding_threads(item, 12), [])
+        self.assertIn("--- qa report ---\n## Findings\nREPORT-BODY", state)
