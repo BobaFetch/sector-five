@@ -653,6 +653,17 @@ def cmd_signal(args):
     except OSError as exc:
         raise RuntimeError("lane state: %s" % type(exc).__name__) from None
     lane_webhook(record)
+    if args.pane is not None and os.environ.get("HERDR_ENV") == "1" and not args.no_rename:
+        title = ("%s · %s" % (args.issue, record["objective"])
+                 if record.get("objective") else args.lane)[:48]
+        try:
+            proc = subprocess.run(["herdr", "pane", "rename", args.pane, title],
+                                  stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, timeout=2)
+            if proc.returncode:
+                print("warning: herdr pane rename exited %s" % proc.returncode, file=sys.stderr)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("warning: herdr pane rename: %s" % type(exc).__name__, file=sys.stderr)
     print(text, end="")
     return 0
 
@@ -872,14 +883,22 @@ def transition_problems(item, target):
         qa = qa_for(item, item.get("pr"))
         if not item.get("pr"):
             problems.append("no PR recorded")
-        if qa.get("verdict") != "approve" or not qa.get("sha"):
+        if target == "merged" and "prs" in item:
+            for pr in item["prs"]:
+                review = (item.get("qa") or {}).get("byPr", {}).get(str(pr)) or {}
+                if review.get("verdict") != "approve" or not review.get("sha"):
+                    problems.append("no qa approve recorded with the reviewed head SHA "
+                                    "for PR %s" % pr)
+        elif qa.get("verdict") != "approve" or not qa.get("sha"):
             problems.append("no qa approve recorded with the reviewed head SHA")
     if target in ("done", "merged"):
         done = item.get("done") or {}
         if done.get("verdict") != "done":
             problems.append("done check has not passed (run: done --issue %s)"
                             % item["issue"])
-        elif done.get("sha") != qa.get("sha"):
+        elif (done.get("sha") != qa.get("sha") and
+              (target != "merged" or "prs" not in item
+               or str(item.get("pr")) in {str(pr) for pr in item["prs"]})):
             problems.append("done check ran on %s but qa approved %s; re-run both "
                             "on the current head" % ((done.get("sha") or "?")[:12],
                                                      (qa.get("sha") or "?")[:12]))
@@ -928,6 +947,10 @@ def cmd_work(args):
     with locked(work_path(args.issue)):
         item = load_work(args.issue)
         if args.action == "set":
+            if not args.pairs and args.prs is None:
+                raise RuntimeError("expected at least one field=value or --prs")
+            if args.prs is not None:
+                item["prs"] = args.prs
             legacy_qa = dict(item.get("qa") or {})
             qa_updates = {}
             for pair in args.pairs:
@@ -953,7 +976,8 @@ def cmd_work(args):
                 qa.update({key: record.get(key) for key in fields})
             save_work(item)
             print("%s: updated %s" % (args.issue, ", ".join(
-                p.partition("=")[0].strip() for p in args.pairs)))
+                [p.partition("=")[0].strip() for p in args.pairs]
+                + (["prs"] if args.prs is not None else []))))
             return 0
         # advance
         if args.to == "blocked" and not args.note:
@@ -1678,6 +1702,11 @@ def cmd_merge_gate(args):
             together = ", ".join("#%s" % r["pr"] for r in [decision, *decision["stack"]])
             decision["checks"]["stack"] = fact(verdict, "PRs to merge together: " + together)
             decision["verdict"] = verdict
+        if len(item.get("prs", [])) > 1 and not facts.get("stack"):
+            decision["checks"]["stack"] = fact(
+                "pending", "stack facts missing for prs " + ", ".join(map(str, item["prs"])))
+            if decision["verdict"] != "fail":
+                decision["verdict"] = "pending"
         if not args.no_log:
             with locked(work_path(args.issue)):
                 item = load_work(args.issue)
@@ -1702,6 +1731,13 @@ def positive_int(raw):
     if value <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return value
+
+
+def pr_list(raw):
+    try:
+        return [positive_int(part.strip()) for part in raw.split(",")]
+    except (ValueError, argparse.ArgumentTypeError):
+        raise argparse.ArgumentTypeError("must be comma-separated positive integers") from None
 
 
 def build_parser():
@@ -1793,7 +1829,8 @@ def build_parser():
                                             "qa.verdict, qa.sha, qa.report, ci.preexisting")
     w_set.add_argument("--issue", required=True)
     w_set.add_argument("--pr", type=positive_int, help="PR number for the qa record")
-    w_set.add_argument("pairs", nargs="+", metavar="field=value")
+    w_set.add_argument("--prs", type=pr_list, help="set the issue's PR list (e.g. 20,21)")
+    w_set.add_argument("pairs", nargs="*", metavar="field=value")
     w_adv = work_sub.add_parser("advance", help="move to a phase if its requirements hold")
     w_adv.add_argument("--issue", required=True)
     w_adv.add_argument("--to", required=True, choices=PHASES + ["blocked"])
@@ -1811,6 +1848,7 @@ def build_parser():
     for field, help_text in (("objective", "current lane objective"), ("pane", "herdr pane ID"),
                              ("sha", "current commit SHA"), ("note", "status context")):
         signal.add_argument("--" + field, help=help_text)
+    signal.add_argument("--no-rename", action="store_true", help="skip renaming the herdr pane")
     signal.set_defaults(func=cmd_signal)
     lanes = sub.add_parser("lanes", help="list lane states and claims as JSON")
     lanes.add_argument("--issue", help="show only lanes and claims for this issue")
