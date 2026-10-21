@@ -2167,8 +2167,23 @@ class PaneRenameTest(LaneCase):
         self.assertEqual(len(argv[4]), 48)
         self.assertIs(run.call_args.kwargs["stdin"], dispatch.subprocess.DEVNULL)
         self.assertTrue(0 < run.call_args.kwargs["timeout"] <= 5)
-        code, run, _ = self.rename("--pane", "p1")  # objective kept from last signal
-        self.assertTrue(run.call_args.args[0][4].startswith("ENG-1 · x"))
+        code, run, _ = self.rename("--pane", "p1")  # same label (objective kept): no rename
+        run.assert_not_called()
+
+    def test_label_change_renames_and_failure_not_recorded(self):
+        def label():
+            with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+                return json.load(fh).get("paneLabel")
+        self.rename("--pane", "p1", "--objective", "a")
+        self.assertEqual(label(), "ENG-1 · a")
+        run = self.rename("--pane", "p1", "--objective", "b")[1]
+        self.assertEqual(run.call_args.args[0][4], "ENG-1 · b")
+        self.assertEqual(self.rename("--pane", "p1", "--objective", "c", returncode=1)[0], 0)
+        self.assertEqual(label(), "ENG-1 · b")  # failed rename not recorded
+        self.rename("--pane", "p1", "--objective", "d", error=FileNotFoundError())
+        self.assertEqual(label(), "ENG-1 · b")
+        run = self.rename("--pane", "p1", "--objective", "c")[1]  # retried after failure
+        run.assert_called_once()
 
     def test_lane_name_without_objective(self):
         self.assertEqual(self.rename("--pane", "p1")[1].call_args.args[0][4], "eng-1-qa")
@@ -2257,3 +2272,60 @@ def _gate_pending_without_stack_facts(self):
 
 
 MergeGateTest.test_pending_without_stack_facts = _gate_pending_without_stack_facts
+
+
+class PrsRulingsTest(WorkRepoCase):
+    item = PrsMergedTest.item
+
+    def setUp(self):
+        super().setUp()
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", "p.md"])
+
+    def test_pr_appends_without_duplicates(self):
+        for pr in ("20", "21", "20"):
+            self.run_main(["work", "set", "--issue", "ENG-1", "pr=" + pr])
+        self.assertEqual((self.item()["pr"], self.item()["prs"]), (20, [20, 21]))
+        self.run_main(["work", "set", "--issue", "ENG-1", "pr="])  # clearing doesn't append
+        self.assertEqual(self.item()["prs"], [20, 21])
+
+    def test_prs_dedupes_and_adds_items_pr(self):
+        self.run_main(["work", "set", "--issue", "ENG-1", "pr=12"])
+        self.run_main(["work", "set", "--issue", "ENG-1", "--prs", "20,21,20"])
+        self.assertEqual(self.item()["prs"], [20, 21, 12])
+
+    def test_legacy_item_without_prs_unchanged(self):
+        self.run_main(["work", "set", "--issue", "ENG-1", "owner=qa", "qa.verdict=approve"])
+        self.assertNotIn("prs", self.item())
+        item = {"issue": "ENG-1", "phase": "done", "plan": "p.md", "owner": "qa", "branch": "b",
+                "pr": 21, "qa": {"verdict": "approve", "sha": "s21"},
+                "done": {"verdict": "done", "sha": "s21"}}
+        self.assertEqual(dispatch.transition_problems(item, "merged"), [])
+
+    def test_done_sha_mismatch_refuses_merged(self):
+        item = {"issue": "ENG-1", "phase": "done", "plan": "p.md", "owner": "qa", "branch": "b",
+                "pr": 21, "prs": [20, 21], "qa": {"byPr": {
+                    "20": {"verdict": "approve", "sha": "s20"},
+                    "21": {"verdict": "approve", "sha": "s21"}}},
+                "done": {"verdict": "done", "sha": "other"}}
+        problems = dispatch.transition_problems(item, "merged")
+        self.assertTrue(any("done check ran on other" in p for p in problems), problems)
+        item["done"]["sha"] = "s21"
+        self.assertEqual(dispatch.transition_problems(item, "merged"), [])
+
+
+def _gate_multi_pr_rulings(self):
+    self.run_main(["work", "set", "--issue", "ENG-1", "--prs", "11,12"])
+    self.gate_config({"wholeStack": False, "checksGreen": True})
+    red = gate_facts(pr=11, sha="base0001", checks=[{"name": "t", "status": "failure"}])
+    code, data, _ = self.gate(gate_facts(stack=[red]))  # the original :1705 probe
+    self.assertEqual((code, data["verdict"]), (4, "fail"))
+    self.assertEqual([(s["pr"], s["verdict"]) for s in data["stack"]], [(11, "fail")])
+    self.assertEqual(self.gate()[0], 7)  # no stack facts
+    self.run_main(["work", "set", "--issue", "ENG-1", "--prs", "10,11,12"])
+    self.run_main(["work", "set", "--issue", "ENG-1", "--pr", "10", "qa.verdict=approve",
+                   "qa.sha=x"])
+    code, data, _ = self.gate(gate_facts(stack=[gate_facts(pr=11, sha="base0001")]))
+    self.assertEqual((code, data["checks"]["stack"]["detail"]), (7, "stack missing PR 10"))
+
+
+MergeGateTest.test_multi_pr_rulings = _gate_multi_pr_rulings
