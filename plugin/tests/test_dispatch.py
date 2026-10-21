@@ -2120,3 +2120,28 @@ class SmallPortsTest(WorkRepoCase):
                     self.assertTrue(action.help, "%s %s" % (name, action.option_strings))
                     self.assertIn(action.help.split("(")[0].strip()[:20], " ".join(
                         sub.format_help().split()), name)
+
+    # --- re-check of 38df08a ---
+    def test_plan_autodetect_word_boundary_table(self):
+        import shutil
+        for name, hit in (("eng-1-x.md", True), ("eng-1.md", True), ("010-ENG-1-upper.md", True),
+                          ("eng-12-x.md", False), ("eng-10.md", False), ("eng-1b.md", False),
+                          ("xeng-1.md", False)):
+            shutil.rmtree(os.path.join(self.meta, "plans"), ignore_errors=True)
+            shutil.rmtree(os.path.join(self.meta, "work"), ignore_errors=True)
+            self.plans(name)
+            want = os.path.join(".sectorfive", "plans", name) if hit else None
+            self.assertEqual(self.new()[1], want, name)
+
+    def test_eng1_does_not_take_eng12_plan(self):
+        self.plans("eng-12-x.md")
+        code, plan, err = self.new()
+        self.assertEqual((code, plan), (0, None))
+        self.assertIn("found 0 plans", err)
+
+    def test_gh_env_disables_git_prompt(self):
+        done = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(dispatch.subprocess, "run", return_value=done) as run:
+            dispatch.gh("api", "x")
+        env = run.call_args.kwargs["env"]
+        self.assertEqual((env["GIT_TERMINAL_PROMPT"], env["GH_PROMPT_DISABLED"]), ("0", "1"))
