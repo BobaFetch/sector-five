@@ -1438,6 +1438,8 @@ def judgment_state(issue, facts, item, sources, limit, pr=None):
     if "qa" in sources:
         report = qa_for(item, pr if pr is not None else
                         facts.get("pr", (item or {}).get("pr"))).get("report")
+        if report:
+            report = os.path.join(os.path.dirname(state_dir()), report)
         if report and os.path.isfile(report):
             with open(report) as fh:
                 parts.append("--- qa report ---\n" + fh.read())
@@ -1583,7 +1585,67 @@ def cmd_done(args):
     return {"done": 0, "escalate": 3, "pending": 7}.get(verdict, 4)
 
 
-def merge_gate_checks(config, facts, item, radius, plan_error=None):
+def qa_finding_threads(item, pr, own_record=False):
+    qa = qa_for(item, pr)
+    if own_record:
+        qa = ((item.get("qa") or {}).get("byPr") or {}).get(str(pr)) or {}
+    report = qa.get("report")
+    if not report:
+        return []
+    try:
+        with open(os.path.join(os.path.dirname(state_dir()), report), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, UnicodeError):
+        return [{"body": "major", "qa": "qa: report unreadable"}]
+    threads, findings_level, found_findings, fence = [], None, False, None
+    first_level = None
+    fence_line = None
+    for number, line in enumerate(lines, 1):
+        marker = re.match(r"\s*(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if (marker and marker.group(1)[0] == fence[0]
+                    and len(marker.group(1)) >= len(fence) and not marker.group(2).strip()):
+                fence = None
+            continue
+        if marker:
+            fence = marker.group(1)
+            fence_line = number
+            continue
+        if line[:1].isspace():
+            continue
+        heading = re.match(r"^(#+)\s+findings\b.*$", line, re.I)
+        if heading:
+            if first_level is None and len(heading.group(1)) in (2, 3):
+                first_level = len(heading.group(1))
+            if first_level is not None and len(heading.group(1)) <= first_level:
+                findings_level, found_findings = first_level, True
+                continue
+        heading = re.match(r"^(#+)(?:\s|$)", line)
+        if heading and findings_level and len(heading.group(1)) <= findings_level:
+            findings_level = None
+            continue
+        if not findings_level or not line.startswith("- "):
+            continue
+        match = re.fullmatch(
+            r"- \[(critical|major|minor|nit|p[0-3])\] (.+?:\d+(?:-\d+)?)\s+(?:—|–|-)\s+"
+            r"(.+)\s+\((open|fixed|wontfix)\)", line.rstrip(), re.I)
+        if not match:
+            print("dispatch: warning: malformed QA finding in %s:%d" % (report, number),
+                  file=sys.stderr)
+            threads.append({"body": "major", "qa": "qa: malformed"})
+        elif match.group(4).lower() == "open":
+            threads.append({"body": match.group(1), "qa": "qa: " + match.group(2)})
+    if fence:
+        print("dispatch: warning: unclosed code fence in %s:%d" % (report, fence_line),
+              file=sys.stderr)
+        threads.append({"body": "major", "qa": "qa: unclosed fence"})
+    if not found_findings:
+        print("dispatch: warning: no Findings section in QA report %s" % report,
+              file=sys.stderr)
+    return threads
+
+
+def merge_gate_checks(config, facts, item, radius, plan_error=None, stack_entry=False):
     """Reuse done's head checks, then apply the repo's merge-only facts."""
     checks, names = {}, {"ci": "checks", "botScore": "score"}
     if config.get("checksGreen"):
@@ -1600,7 +1662,9 @@ def merge_gate_checks(config, facts, item, radius, plan_error=None):
                evaluate_facts({"checks": checks}, normalized, item, facts["pr"]).items()}
     if "maxThreadSeverity" in config:
         levels, blocked, unknown = ("nit", "minor", "major", "critical"), [], 0
-        for thread in facts.get("threads", []):
+        threads = facts.get("threads", []) + qa_finding_threads(
+            item, facts["pr"], own_record=stack_entry or len(item.get("prs", [])) > 1)
+        for thread in threads:
             if thread.get("resolved") or thread.get("outdated"):
                 continue
             body = thread.get("body", "")
@@ -1613,7 +1677,7 @@ def merge_gate_checks(config, facts, item, radius, plan_error=None):
             severity = max(severities, key=levels.index) if severities else "major"
             unknown += not severities
             if levels.index(severity) > levels.index(config["maxThreadSeverity"]):
-                blocked.append(severity if severities else "severity unknown")
+                blocked.append(thread.get("qa") or (severity if severities else "severity unknown"))
         results["threads"] = fact("fail", ", ".join(blocked)) if blocked else fact(
             "pass", "no threads exceed the allowed severity" +
             ("; %d severity unknown (treated as major)" % unknown if unknown else ""))
@@ -1712,7 +1776,8 @@ def cmd_merge_gate(args):
         except (OSError, TypeError, UnicodeError):
             pass  # An unreadable local plan fails the blastRadius check.
         decision = merge_gate_checks(config, facts, item, radius, plan_error)
-        decision["stack"] = [merge_gate_checks(config, f, item, radius, plan_error) for f in lower]
+        decision["stack"] = [merge_gate_checks(config, f, item, radius, plan_error,
+                                              stack_entry=True) for f in lower]
         if config.get("wholeStack"):
             statuses = {r["verdict"] for r in [decision, *decision["stack"]]}
             verdict = "fail" if "fail" in statuses else "pending" if "pending" in statuses else "pass"
