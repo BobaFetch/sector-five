@@ -139,7 +139,7 @@ One state file per issue at `.sectorfive/work/<issue>.json`. Issue keys are
 letters, digits, `.`, `_` and `-` (for example `ENG-123`).
 
 ```sh
-python3 tools/dispatch.py work new --issue ENG-123   # finds plans/*eng-123*.md; or --plan <path>
+python3 tools/dispatch.py work new --issue ENG-123   # auto-detects one matching plan; or --plan <path>
 python3 tools/dispatch.py work set --issue ENG-123 owner=frontend branch=fix/eng-123-x
 python3 tools/dispatch.py route --task "..." --plan .sectorfive/plans/eng-123.md \
   --expect frontend --issue ENG-123
@@ -199,6 +199,7 @@ Keep `.sectorfive/` on a local disk, not a network filesystem.
 ```sh
 test "${HERDR_ENV:-}" = 1                       # herdr mode?
 herdr worktree create ...                         # one workspace per issue; read IDs from the JSON
+herdr tab rename <tab id> ENG-123                  # planning names the tab at setup
 export SECTORFIVE_STATE="/path/to/main-checkout/.sectorfive"
 python3 tools/dispatch.py work set --issue ENG-123 lane=<workspace id>
 herdr pane split --pane <pane in that workspace> --direction right --no-focus
@@ -224,7 +225,7 @@ herdr agent read eng-123-frontend --source recent-unwrapped --lines 200
 
 ```sh
 python3 tools/dispatch.py claim --lane eng-123-frontend --issue ENG-123 --path <path> [<path> ...]   # before editing (exit 3 on conflict)
-python3 tools/dispatch.py work signal --lane eng-123-frontend --issue ENG-123 --status working   # at each status change: starting|working|blocked|review|done|failed|idle [--objective <text>] [--pane <id>] [--sha <sha>] [--note <text>]
+python3 tools/dispatch.py work signal --lane eng-123-frontend --issue ENG-123 --status working   # at each status change: starting|working|blocked|review|done|failed|idle [--objective <text>] [--pane <id>] [--sha <sha>] [--note <text>] [--no-rename]
 python3 tools/dispatch.py lanes [--issue ENG-123] [--stale-after 30]   # orchestrator fan-in; stale claims released by the orchestrator
 python3 tools/dispatch.py claim --lane eng-123-frontend --release   # when done
 ```
@@ -243,15 +244,15 @@ Every lane command is local or read-only to GitHub and never prompts:
 
 | Command | Used for | Exit codes |
 | --- | --- | --- |
-| `python3 <plugin>/tools/dispatch.py work signal --lane <l> --issue <k> --status <s> [--objective <t>] [--pane <id>] [--no-rename]` | status changes; renames the pane under `HERDR_ENV=1` | 0, 2 |
-| `… work set --issue <k> pr=<n>` / `--prs 20,21` / `--pr <n> qa.…` | record fields; `pr=` appends to `prs`, `--prs` replaces it | 0, 2 |
-| `… work show [--format json]` | read item state | 0, 2 |
-| `… claim --lane <l> --issue <k> --path <p>…` / `--release` | before editing / when done | 0, 2, 3 |
-| `… lanes [--issue <k>] [--stale-after 30]` | fan-in | 0, 2 |
-| `… merge-gate --issue <k> [--pr <n>] [--facts F]` | merge readiness | 0, 2, 4, 6, 7 |
-| `… done --issue <k> [--pr <n>]` | done check | 0, 2, 3, 4, 6, 7 |
-| `herdr agent …`, `herdr pane …` | lane control | herdr's |
-| `git …`, the repo's test command | build and verify | — |
+| `work signal` ([usage](#lane-hooks)) | status changes; renames the pane under `HERDR_ENV=1` | 0, 2 |
+| `work set` ([usage](#work-items)) | record fields; `pr=` appends to `prs`, `--prs` replaces it | 0, 2 |
+| `work show` ([usage](#work-items)) | read item state | 0, 2 |
+| `claim` ([usage](#lane-hooks)) | before editing / when done | 0, 2, 3 |
+| `lanes` ([usage](#lane-hooks)) | fan-in | 0, 2 |
+| `merge-gate` ([usage](#merge-gate)) | merge readiness | 0, 2, 4, 6, 7 |
+| `done` ([usage](#done-check)) | done check | 0, 2, 3, 4, 6, 7 |
+| `herdr agent`, `herdr pane` ([usage](#herdr-lanes)) | lane control | herdr's |
+| `git`, the repo's test command | build and verify | — |
 
 No dispatcher command exits 1, and none reads stdin. Example auto-review allow
 rule (adapt the syntax to your harness; the user installs it):
@@ -413,6 +414,14 @@ for the `mergeGate` config table, facts shape, severity, score, stack and plan
 path rules, [Multi-PR items](../contract.md#multi-pr-items) and the qa report
 [Findings format](../contract.md#qa-review-format). Open findings count only
 when `maxThreadSeverity` is set.
+
+Write each finding on one line under `## Findings` in the QA report:
+
+```md
+## Findings
+- [major] src/api/orders.py:42 — cursor is not validated (open)
+- [nit] src/api/orders.py:50-52 — duplicated branch retained for clarity; planning agreed (wontfix)
+```
 
 Exit codes: 0 pass; 4 fail (including BR0); 7 pending; 6 invalid or missing
 `mergeGate` config; 2 bad arguments, no inputs, bad facts or a `gh` error.

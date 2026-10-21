@@ -191,9 +191,9 @@ A lane is one role working one issue. Lanes stay open between steps, so a role k
 - **One workspace per issue.** planning creates it with `herdr worktree create` (one git worktree per issue) and records it with `work set lane=<workspace id>`.
 - **Start a lane on demand.** `herdr pane split --no-focus` in the issue's workspace, then `herdr agent start <issue>-<role> --kind <harness> --pane <pane id> -- <args>`. The harness, model and effort come from the role's pin and the dispatcher's tier choice, as in Model policy. Lane names are lowercase (`eng-123-frontend`). Parse every ID from herdr's JSON output; never guess one.
 - **Per-issue planner lanes.** An orchestrator may run one `<issue>-planning` lane per issue in parallel. Each one changes only its own issue's work item and plan; the shared `dispatch-log.jsonl` is locked, so concurrent appends are safe.
-- **Tab and pane labels.** At workspace setup planning names the tab after the issue (`herdr tab rename <tab id> <issue>`). Pane labels follow the lane: `work signal --pane <id>` renames the pane (see Lane hooks).
-- **Non-interactive launch.** Lanes never wait on a prompt: harness args (`codex exec`, `herdr agent start … -- <args>`) never ask a TTY question, and `dispatch.py` never reads stdin. Its `gh` and `herdr` calls run with stdin from `/dev/null`; `gh` also gets `GH_PROMPT_DISABLED=1` and `GIT_TERMINAL_PROMPT=0`.
-- **Model check.** A Codex lane confirms its model and effort in `/status` before its first step. On a mismatch it stops with `work signal --status failed --note <what /status showed>`, and planning reads the lane after start.
+- **Tab and pane labels.** At workspace setup planning names the tab after the issue with `herdr tab rename`. Pane labels follow the lane through `work signal` with `--pane` (see Lane hooks). See the runbook's [Herdr lanes](docs/runbook.md#herdr-lanes) for usage.
+- **Non-interactive launch.** Lanes never wait on a prompt: harness launch arguments for `codex exec` and `herdr agent start` never ask a TTY question, and `dispatch.py` never reads stdin. Its `gh` and `herdr` calls run with stdin from `/dev/null`; `gh` also gets `GH_PROMPT_DISABLED=1` and `GIT_TERMINAL_PROMPT=0`.
+- **Model check.** A Codex lane confirms its model and effort in `/status` before its first step. On a mismatch it stops, signals `failed` with the observed model and effort in `--note`, and planning reads the lane after start. See the runbook's [Commands lanes run](docs/runbook.md#commands-lanes-run) for usage.
 - **Approval-free commands.** The commands a lane runs, and an example allow rule for them, are in the runbook's [Commands lanes run](docs/runbook.md#commands-lanes-run). One rule covers them; `route`, `gate` and `check` stay with planning.
 - **Reuse lanes.** Later steps for the same issue and role go to the same lane. A lane never takes a second issue.
 - **Fan out, then fan in.** Send work with `herdr agent prompt <lane> "..."` without `--wait`, so planning can start other lanes. Then watch with `herdr agent list` and `herdr agent wait <lane>`, and read results with `herdr agent read <lane> --source recent-unwrapped`. Use `--wait` only for short exchanges. No sleep or polling loops.
@@ -317,15 +317,15 @@ Each issue in flight has one state file, `.sectorfive/work/<issue>.json`, manage
 
 A lane runs `claim` before it edits files, runs `work signal` at every status change, and releases its claim (`claim --release`) when it finishes or hands off.
 
-- `work signal --lane <lane> --issue <key> --status starting|working|blocked|review|done|failed|idle [--objective <text>] [--pane <id>] [--sha <sha>] [--note <text>] [--no-rename]` merges the given fields into the lane file, sets `ts` (UTC), appends the record to the lane log and prints it as one JSON line. The work item must exist. It warns when the lane has no claim, and exits 2 when the lane's claim is for another issue.
-- **Pane rename.** With `--pane`, `HERDR_ENV=1` and no `--no-rename`, signal runs `herdr pane rename <pane> "<issue> · <objective>"` (the lane name when there is no objective; cut to 48 characters) when that pane's label changed. Labels are kept per pane in the lane file (`paneLabels`), so two lanes in one tab rename independently. Best effort: a missing `herdr`, a timeout (2 s) or a non-zero exit only warns, records no label and never changes the exit code.
+- `work signal` merges the given fields into the lane file, sets `ts` (UTC), appends the record to the lane log and prints it as one JSON line. See the runbook's [Lane hooks](docs/runbook.md#lane-hooks) for syntax, statuses and options. The work item must exist. It warns when the lane has no claim, and exits 2 when the lane's claim is for another issue.
+- **Pane rename.** With `--pane`, `HERDR_ENV=1` and no `--no-rename`, signal uses `herdr pane rename` to set the label to `<issue> · <objective>` (the lane name when there is no objective; truncated to 48 characters) when that pane's label changes. Labels are kept per pane in the lane file (`paneLabels`), so two lanes in one tab rename independently. Best effort: a missing `herdr`, a timeout (2 s) or a non-zero exit only warns, records no label and never changes the exit code.
 - **Webhook (optional).** `SECTORFIVE_WEBHOOK_URL` and `SECTORFIVE_WEBHOOK_TIMEOUT`, set in `plugin/.env` or the environment, POST each signal record as JSON. Failures only warn and never change the exit code. The timeout defaults to 2 s and is capped at 5 s; the URL is never printed or logged.
 - `lanes [--issue <key>] [--stale-after <minutes>]` prints `{"lanes": [...], "claims": [...], "errors": [...]}`. Each lane carries `stale: true` when its `ts` is older than `--stale-after` (default 30). Unreadable lane files are listed by file name in `errors` and the command still exits 0; `--issue` filters lanes and claims but not `errors`. A corrupt `claims.json` exits 2.
 - `claim --lane <lane> --issue <key> [--path <path>...]` records the lane's claim in `lanes/claims.json` and prints it as JSON; claiming again replaces the lane's claim. It exits 3 when another lane claims the same issue or an overlapping path: equal paths, one path inside the other's folder, a path matching the other's glob, or two globs where one fixed prefix (the text before the first `*`, `?` or `[`) starts with the other. `claim --lane <lane> --release` drops the claim, prints `released: true`, or `released: false` when there was none, and exits 0 either way. Both are logged to the lane log. Claims never expire on their own: the orchestrator reads `stale` from `lanes` and releases stale claims.
 
 | Phase | Entered when (enforced by `work advance`) |
 | --- | --- |
-| `planned` | `work new --issue <key> [--plan <path>]` |
+| `planned` | `work new` creates the item; see the runbook's [Work items](docs/runbook.md#work-items) for usage |
 | `building` | owner recorded; when the dispatcher is `on`, the step was routed or recorded unrouted with `--issue <key>` |
 | `review` | branch recorded |
 | `open` | PR recorded; qa `approve` recorded with the head SHA it reviewed |
@@ -356,7 +356,7 @@ qa's verdict is kept per PR under `qa.byPr["<pr>"]` (`verdict`, `sha`, `report`,
 
 ### Multi-PR items
 
-An issue can carry a stack of PRs. `prs` is the list (additive; a legacy item without it reads as `[pr]`), and `pr` stays the current, top PR. `work set pr=N` sets `pr` and appends N to `prs` when new. `work set --prs 20,21` replaces the list, drops duplicates and always keeps the item's `pr`. `work show` lists `prs`.
+An issue can carry a stack of PRs. `prs` is the list (additive; a legacy item without it reads as `[pr]`), and `pr` stays the current, top PR. Setting `pr` with `work set` also appends it to `prs` when new. The `--prs` option replaces the list, drops duplicates and always keeps the item's `pr`. `work show` lists `prs`. See the runbook's [Work items](docs/runbook.md#work-items) for usage.
 
 - **Merged.** `work advance --to merged` needs qa `approve` in each listed PR's own `qa.byPr` record; the top-level record is no fallback.
 - **Gate.** With more than one entry in `prs`, the gate checks every PR in the stack facts, whether or not `wholeStack` is set, each against its own qa record and its own QA report. It is `pending` (exit 7) when the facts have no `stack` or a listed PR is missing from them, unless a check already failed; a red PR fails it (exit 4). A single-PR item still follows `wholeStack`.
@@ -471,13 +471,7 @@ When `config.json` has `dispatcher.status: "on"`, planning **must** route every 
 
 ### QA review format
 
-qa reviews a diff as an automated PR reviewer would and writes each finding into its report under a `## Findings` heading, one line each:
-
-```md
-## Findings
-- [major] src/api/orders.py:42 — cursor is not validated (open)
-- [nit] src/api/orders.py:50-52 — duplicated branch (wontfix)
-```
+qa reviews a diff as an automated PR reviewer would and writes each finding into its report under a `## Findings` heading, one line per finding. See the example in the runbook's [Merge gate](docs/runbook.md#merge-gate) section.
 
 - **Line format.** `- [critical|major|minor|nit|P0–P3] <path>:<line>[-<line>] <sep> <text> (open|fixed|wontfix)`. `P0`–`P3` map to critical, major, minor, nit. `<sep>` is an em dash, an en dash or ` - `.
 - **What blocks.** Only `open` findings, counted against `maxThreadSeverity`. A `wontfix` needs a reason in its text and planning's agreement. No report recorded means no findings.
