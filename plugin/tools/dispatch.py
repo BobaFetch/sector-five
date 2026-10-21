@@ -26,6 +26,7 @@ import contextlib
 import datetime
 import fcntl
 import fnmatch
+import glob
 import json
 import os
 import re
@@ -768,6 +769,15 @@ def save_work(item):
 
 
 def new_work(issue, plan):
+    if plan is None:
+        matches = [path for path in glob.glob(os.path.join(state_dir(), "plans", "*.md"))
+                   if issue.casefold() in os.path.basename(path).casefold()
+                   and os.path.isfile(path)]
+        if len(matches) == 1:
+            plan = os.path.relpath(matches[0], os.path.dirname(state_dir()))
+        else:
+            print("warning: found %d plans matching %s; no plan recorded"
+                  % (len(matches), issue), file=sys.stderr)
     return {
         "version": 1, "issue": issue, "phase": "planned", "plan": plan,
         "owner": None, "branch": None, "pr": None, "lane": None,
@@ -968,7 +978,8 @@ def cmd_work(args):
 
 DEFAULT_RULES = {
     "version": 1,
-    "checks": {"ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}, "mergeable": {}},
+    "checks": {"ci": {}, "reviewThreads": {}, "qa": {}, "draft": {}, "mergeable": {},
+               "planLocal": {}},
     "judgments": [],
 }
 CHECK_KEYS = {
@@ -977,6 +988,7 @@ CHECK_KEYS = {
     "botScore": {"author": str, "pattern": str, "min": (int, float),
                  "commitPattern": str},
     "planFile": {"glob": str, "caseInsensitive": bool},
+    "planLocal": {},
     "prBody": {"sections": list},
     "qa": {},
     "draft": {},
@@ -1085,7 +1097,8 @@ def load_rules(path):
 def gh(*argv):
     try:
         proc = subprocess.run(["gh", *argv], capture_output=True, text=True,
-                              timeout=60)
+                              timeout=60, stdin=subprocess.DEVNULL,
+                              env=dict(os.environ, GH_PROMPT_DISABLED="1"))
     except FileNotFoundError:
         raise RuntimeError("the done check reads PR facts with the gh CLI; "
                            "install it or pass --facts")
@@ -1316,6 +1329,14 @@ def evaluate_facts(rules, facts, item, pr=None):
             results["botScore"] = fact(
                 "pass" if score >= opts["min"] else "fail",
                 "score %g (min %g)" % (score, opts["min"]))
+    if "planLocal" in checks:
+        plan = (item or {}).get("plan")
+        if not plan:
+            results["planLocal"] = fact("fail", "no plan recorded")
+        else:
+            path = os.path.join(os.path.dirname(state_dir()), plan)
+            results["planLocal"] = fact("pass", plan) if os.path.isfile(path) else fact(
+                "fail", "plan not found on disk")
     if "planFile" in checks:
         issue = (item or {}).get("issue") or facts.get("issue", "")
         match = match_plan_file(facts.get("files", []), checks["planFile"], issue)
@@ -1750,13 +1771,16 @@ def build_parser():
     done.add_argument("--facts", help="read PR facts from this JSON file instead of gh")
     done.set_defaults(func=cmd_done)
     merge = sub.add_parser("merge-gate", help="report the repo's merge bar without GitHub writes")
-    merge.add_argument("--issue", required=True)
-    merge.add_argument("--pr", type=positive_int)
-    for option in ("facts", "plan", "config"):
-        merge.add_argument("--" + option)
-    merge.add_argument("--gh", action="store_true")
-    merge.add_argument("--no-log", action="store_true")
-    merge.add_argument("--format", choices=["text", "json"], default="text")
+    merge.add_argument("--issue", required=True, help="work item key")
+    merge.add_argument("--pr", type=positive_int, help="PR number (default: the work item's)")
+    for option, help_text in (("facts", "read PR facts from this JSON file instead of gh"),
+                              ("plan", "override the work item's local plan path"),
+                              ("config", "config path (default: .sectorfive/config.json)")):
+        merge.add_argument("--" + option, help=help_text)
+    merge.add_argument("--gh", action="store_true", help="read PR facts using gh")
+    merge.add_argument("--no-log", action="store_true", help="do not save or log the gate result")
+    merge.add_argument("--format", choices=["text", "json"], default="text",
+                       help="output format (default: text)")
     merge.set_defaults(func=cmd_merge_gate)
     work = sub.add_parser("work", help="per-issue work item state")
     work_sub = work.add_subparsers(dest="action", required=True)
@@ -1777,22 +1801,26 @@ def build_parser():
     w_show.add_argument("--format", choices=["text", "json"], default="text")
     work.set_defaults(func=cmd_work)
     signal = work_sub.add_parser("signal", help="record a lane's current state")
-    signal.add_argument("--lane", required=True)
-    signal.add_argument("--issue", required=True)
+    signal.add_argument("--lane", required=True, help="lane name")
+    signal.add_argument("--issue", required=True, help="work item key")
     signal.add_argument("--status", required=True,
+                        help="current lane status",
                         choices=["starting", "working", "blocked", "review", "done", "failed", "idle"])
-    for field in ("objective", "pane", "sha", "note"):
-        signal.add_argument("--" + field)
+    for field, help_text in (("objective", "current lane objective"), ("pane", "herdr pane ID"),
+                             ("sha", "current commit SHA"), ("note", "status context")):
+        signal.add_argument("--" + field, help=help_text)
     signal.set_defaults(func=cmd_signal)
     lanes = sub.add_parser("lanes", help="list lane states and claims as JSON")
-    lanes.add_argument("--issue")
-    lanes.add_argument("--stale-after", type=float, default=30)
+    lanes.add_argument("--issue", help="show only lanes and claims for this issue")
+    lanes.add_argument("--stale-after", type=float, default=30,
+                       help="minutes before a lane is stale (default: 30)")
     lanes.set_defaults(func=cmd_lanes)
     claim = sub.add_parser("claim", help="claim an issue and paths, or release a lane")
-    claim.add_argument("--lane", required=True)
-    claim.add_argument("--issue")
-    claim.add_argument("--path", nargs="+", action="extend", default=[])
-    claim.add_argument("--release", action="store_true")
+    claim.add_argument("--lane", required=True, help="lane owning the claim")
+    claim.add_argument("--issue", help="work item key (required unless releasing)")
+    claim.add_argument("--path", nargs="+", action="extend", default=[],
+                       help="paths or globs to claim; may be repeated")
+    claim.add_argument("--release", action="store_true", help="release this lane's claim")
     claim.set_defaults(func=cmd_claim)
     return parser
 
