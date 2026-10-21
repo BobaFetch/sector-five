@@ -172,7 +172,7 @@ python3 tools/dispatch.py work set --issue ENG-123 --pr 740 qa.verdict=approve q
 ```
 
 `--pr` defaults to the item's `pr`; it must be a positive integer and needs at
-least one `qa.*` field. See [Per-PR QA](../contract.md#work-items-and-the-done-check)
+least one `qa.*` field. See [Per-PR QA](../contract.md#per-pr-qa)
 for record lookup, legacy mirrors and migration.
 
 ## Herdr lanes
@@ -316,7 +316,7 @@ A fuller example:
 | `mergeable` | `maxBehind` (integer, optional) | GitHub reports no conflicts with the base, and the head is at most `maxBehind` commits behind it when that is set. Still computing → pending. Set `maxBehind` when CI must have run against a recent base; leave it out in busy repos where every branch is always behind. |
 | `planFile` | `glob` (required; `{issue}` is replaced by the key), `caseInsensitive` (bool, default true) | a file on the PR's head commit matches |
 | `prBody` | `sections` (required list) | each name starts a line of the body, as a heading (`## Plan`), bold (`**Plan**`) or plain text (`Resolves ENG-123`) |
-| `qa` | none | that PR's own qa record has `approve` with `sha` equal to the PR head; see [Per-PR QA](../contract.md#work-items-and-the-done-check) for legacy fallback |
+| `qa` | none | that PR's own qa record has `approve` with `sha` equal to the PR head; see [Per-PR QA](../contract.md#per-pr-qa) for legacy fallback |
 | `draft` | none | the PR is not a draft |
 
 **Judgments** (up to 64), asked only when every check passes:
@@ -377,7 +377,7 @@ and BR0 rule.
 | Code | Meaning |
 | --- | --- |
 | 0 | routed or override (route) / proceed (gate) / ready or off (check) / recorded (unrouted) / done (done) / pass (merge-gate) / ok (work) |
-| 2 | usage or provider/probe error (stderr explains) |
+| 2 | usage, provider, validation, or lane/claim state error; merge-gate bad args, no inputs or gh error (stderr explains) |
 | 3 | escalate — confidence too low, `--expect` mismatch below `--trust`, or done judgments unavailable |
 | 4 | blocked — gate statement holds / not done or blocked (done) / advance refused (work) / fail, including BR0 (merge-gate) |
 | 5 | no credentials (check) |

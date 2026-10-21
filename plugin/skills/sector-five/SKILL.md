@@ -192,7 +192,7 @@ the repo's judgment statements. Exit 0 done, 4 not done or blocked, 7 pending
 (re-run later), 3 escalate. The rules are owner-configured in
 `.sectorfive/done.json`; `docs/runbook.md` documents every option.
 
-- Record qa per PR with `work set --pr`: [runbook](../../docs/runbook.md#work-items), [Per-PR QA contract](../../contract.md#work-items-and-the-done-check).
+- Record qa per PR with `work set --pr`: [runbook](../../docs/runbook.md#work-items), [Per-PR QA contract](../../contract.md#per-pr-qa).
 - Get `merge-gate` pass before handing a PR to the user: [runbook](../../docs/runbook.md#merge-gate), [contract](../../contract.md#merge-gate).
 - Include the Blast radius line on every plan: [runbook](../../docs/runbook.md#blast-radius), [contract](../../contract.md#blast-radius).
 
