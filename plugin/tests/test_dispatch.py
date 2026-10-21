@@ -944,13 +944,14 @@ class DoneCmdTest(WorkRepoCase):
         self.assertIn("unknown check", err)
 
     def test_defaults_without_rules_file(self):
+        open(os.path.join(self.repo, "p.md"), "w").close()  # planLocal needs it on disk
         code, out, _ = self.run_main(["done", "--issue", "ENG-1", "--facts",
                                       self.facts_path, "--format", "json"])
         self.assertEqual(code, 0)
         decision = json.loads(out)
         self.assertEqual(decision["rules"], "defaults")
         self.assertEqual(set(decision["facts"]),
-                         {"ci", "reviewThreads", "qa", "draft", "mergeable"})
+                         {"ci", "reviewThreads", "qa", "draft", "mergeable", "planLocal"})
 
     def test_check_reports_rules(self):
         with open(os.path.join(self.meta, "done.json"), "w") as fh:
@@ -2019,3 +2020,103 @@ class MergeGateTest(WorkRepoCase):
             self.assertEqual(code, 6)
             self.assertIn("no mergeGate config", err)
             self.gate_config(None)
+
+
+# --- small-ports (plan 010) PR A: help, no stdin, plan default, planLocal ---
+
+class SmallPortsTest(WorkRepoCase):
+    def test_gh_runs_without_stdin_or_prompts(self):
+        done = mock.Mock(returncode=0, stdout="{}", stderr="")
+        with mock.patch.object(dispatch.subprocess, "run", return_value=done) as run, \
+             mock.patch("builtins.input", side_effect=AssertionError("input called")):
+            self.assertEqual(dispatch.gh("pr", "view", "1"), "{}")
+        kwargs = run.call_args.kwargs
+        self.assertIs(kwargs["stdin"], dispatch.subprocess.DEVNULL)
+        self.assertEqual(kwargs["env"]["GH_PROMPT_DISABLED"], "1")
+        self.assertEqual(kwargs["env"]["PATH"], os.environ["PATH"])  # rest of env kept
+        with open(dispatch.__file__) as fh:
+            source = fh.read()
+        self.assertNotIn("input(", source)
+        self.assertNotIn("sys.stdin", source)
+
+    def plans(self, *names):
+        d = os.path.join(self.meta, "plans")
+        os.makedirs(d, exist_ok=True)
+        for name in names:
+            open(os.path.join(d, name), "w").close()
+
+    def new(self, *extra):
+        code, _, err = self.run_main(["work", "new", "--issue", "ENG-1", *extra])
+        with open(os.path.join(self.meta, "work", "ENG-1.json")) as fh:
+            return code, json.load(fh)["plan"], err
+
+    def test_plan_autodetect_none(self):
+        code, plan, err = self.new()
+        self.assertEqual((code, plan), (0, None))
+        self.assertIn("found 0 plans matching ENG-1", err)
+
+    def test_plan_autodetect_one_case_insensitive(self):
+        self.plans("010-eng-1-thing.md", "011-other.md", "eng-1-notes.txt")
+        code, plan, err = self.new()
+        self.assertEqual((code, plan), (0, os.path.join(".sectorfive", "plans", "010-eng-1-thing.md")))
+        self.assertEqual(err, "")
+
+    def test_plan_autodetect_many_and_override(self):
+        self.plans("a-ENG-1.md", "b-eng-1.md")
+        code, plan, err = self.new()
+        self.assertEqual(plan, None)
+        self.assertIn("found 2 plans", err)
+        os.unlink(os.path.join(self.meta, "work", "ENG-1.json"))
+        code, plan, err = self.new("--plan", "mine.md")
+        self.assertEqual((code, plan, err), (0, "mine.md", ""))
+
+    def done(self, env=None):
+        facts = os.path.join(self.repo, "facts.json")
+        with open(facts, "w") as fh:
+            json.dump(pr_facts(), fh)
+        code, out, _ = self.run_main(["done", "--issue", "ENG-1", "--facts", facts,
+                                      "--format", "json", "--no-log"], env=env)
+        return code, json.loads(out)["facts"].get("planLocal")
+
+    def ready(self, plan):
+        self.run_main(["work", "new", "--issue", "ENG-1", "--plan", plan])
+        self.run_main(["work", "set", "--issue", "ENG-1", "owner=frontend", "branch=b",
+                       "pr=12", "qa.verdict=approve", "qa.sha=abc123def456"])
+
+    def test_plan_local_pass_fail_worktree_and_opt_out(self):
+        self.ready(".sectorfive/plans/eng-1.md")
+        code, result = self.done()
+        self.assertEqual((code, result["status"], result["detail"]),
+                         (4, "fail", "plan not found on disk"))
+        self.plans("eng-1.md")
+        self.assertEqual(self.done(), (0, {"status": "pass",
+                                           "detail": ".sectorfive/plans/eng-1.md"}))
+        import tempfile, shutil
+        worktree = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, worktree)
+        os.chdir(worktree)  # relative plan resolves against the state checkout
+        self.assertEqual(self.done({"SECTORFIVE_STATE": self.meta})[1]["status"], "pass")
+        os.chdir(self.repo)
+        with open(os.path.join(self.meta, "done.json"), "w") as fh:
+            json.dump({"version": 1, "checks": {"qa": {}}}, fh)
+        os.unlink(os.path.join(self.meta, "plans", "eng-1.md"))
+        self.assertEqual(self.done(), (0, None))
+
+    def test_plan_local_no_plan_recorded(self):
+        self.run_main(["work", "new", "--issue", "ENG-1"])
+        self.run_main(["work", "set", "--issue", "ENG-1", "pr=12"])
+        self.assertEqual(self.done()[1], {"status": "fail", "detail": "no plan recorded"})
+
+    def test_help_describes_every_option(self):
+        parser = dispatch.build_parser()
+        subs = {a.dest: a for a in parser._actions if hasattr(a, "choices") and a.choices}
+        commands = subs["command"].choices
+        work = {a.dest: a for a in commands["work"]._actions if getattr(a, "choices", None)}
+        for name, sub in (("merge-gate", commands["merge-gate"]), ("lanes", commands["lanes"]),
+                          ("claim", commands["claim"]),
+                          ("work signal", work["action"].choices["signal"])):
+            for action in sub._actions:
+                if action.option_strings and action.dest != "help":
+                    self.assertTrue(action.help, "%s %s" % (name, action.option_strings))
+                    self.assertIn(action.help.split("(")[0].strip()[:20], " ".join(
+                        sub.format_help().split()), name)
