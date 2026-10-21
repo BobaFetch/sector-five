@@ -1598,6 +1598,7 @@ def qa_finding_threads(item, pr, own_record=False):
     except (OSError, UnicodeError):
         return [{"body": "major", "qa": "qa: report unreadable"}]
     threads, findings_level, found_findings, fence = [], None, False, None
+    first_level = None
     fence_line = None
     for number, line in enumerate(lines, 1):
         marker = re.match(r"\s*(`{3,}|~{3,})(.*)$", line)
@@ -1612,10 +1613,13 @@ def qa_finding_threads(item, pr, own_record=False):
             continue
         if line[:1].isspace():
             continue
-        heading = re.match(r"^(#{2,3})\s+findings\b.*$", line, re.I)
-        if heading and findings_level is None:
-            findings_level, found_findings = len(heading.group(1)), True
-            continue
+        heading = re.match(r"^(#+)\s+findings\b.*$", line, re.I)
+        if heading:
+            if first_level is None and len(heading.group(1)) in (2, 3):
+                first_level = len(heading.group(1))
+            if first_level is not None and len(heading.group(1)) <= first_level:
+                findings_level, found_findings = first_level, True
+                continue
         heading = re.match(r"^(#+)(?:\s|$)", line)
         if heading and findings_level and len(heading.group(1)) <= findings_level:
             findings_level = None
