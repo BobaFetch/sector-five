@@ -2547,3 +2547,85 @@ class DoneRelativeReportTest(WorkRepoCase):
             state = dispatch.judgment_state("ENG-1", {"pr": 12}, item, ["qa"], 10000)
             self.assertEqual(dispatch.qa_finding_threads(item, 12), [])
         self.assertIn("--- qa report ---\n## Findings\nREPORT-BODY", state)
+
+
+class QaFindingsFinalA3Test(WorkRepoCase):
+    """A3 final re-check: CommonMark fences, nested heading, every Findings section counts."""
+    L = "- [major] a.py:1 — x (open)\n"
+    M = "- [minor] m.py:2 — y (open)\n"
+    EX = "- [major] e.py:9 — example (open)\n"
+    threads = QaFindingsParseTest.threads
+
+    def qs(self, text):
+        got, err = self.threads(text)
+        return [q for _, q in got], err
+
+    def test_nested_heading_continues_then_ends(self):
+        got, _ = self.qs("## Findings\n" + self.L + "### Findings\n" + self.M +
+                         "### Notes\n- [major] n.py:3 — still in (open)\n## Other\n" + self.EX)
+        self.assertEqual(got, ["qa: a.py:1", "qa: m.py:2", "qa: n.py:3"])
+
+    def test_four_backtick_fence_holds_three(self):
+        got, err = self.qs("## Findings\n````\n```\n" + self.EX + "```\n" + self.EX +
+                           "````\n" + self.L)
+        self.assertEqual(got, ["qa: a.py:1"])
+        self.assertNotIn("unclosed", err)
+
+    def test_backtick_fence_holds_tilde(self):
+        got, _ = self.qs("## Findings\n```\n~~~\n" + self.EX + "~~~\n" + self.EX + "```\n" + self.L)
+        self.assertEqual(got, ["qa: a.py:1"])
+
+    def test_info_string_inside_fence_does_not_close(self):
+        got, _ = self.qs("## Findings\n```\n```md\n" + self.EX + "```\n" + self.L)
+        self.assertEqual(got, ["qa: a.py:1"])
+
+    def test_plain_close_for_info_opener(self):
+        got, err = self.qs("## Findings\n```python\n" + self.EX + "```\n" + self.L)
+        self.assertEqual(got, ["qa: a.py:1"])
+        self.assertNotIn("unclosed", err)
+
+    def test_repeated_section(self):
+        got, _ = self.qs("## Findings\n" + self.L + "## Findings\n" + self.M)
+        self.assertEqual(got, ["qa: a.py:1", "qa: m.py:2"])
+
+    def test_reopened_after_other(self):
+        got, _ = self.qs("## Findings\n" + self.L + "## Other\n" + self.EX +
+                         "## Findings (round 2)\n" + self.M)
+        self.assertEqual(got, ["qa: a.py:1", "qa: m.py:2"])
+
+    def test_malformed_in_second_section(self):
+        got, err = self.qs("## Findings\n" + self.L + "## Other\n## Findings\n- junk line\n")
+        self.assertEqual(got, ["qa: a.py:1", "qa: malformed"])
+        self.assertIn("malformed QA finding in r.md:5", err)
+
+    def test_h3_then_h1(self):
+        got, err = self.qs("### Findings\n" + self.L + "# Findings\n" + self.M)
+        self.assertEqual(got, ["qa: a.py:1", "qa: m.py:2"])
+        self.assertNotIn("no Findings", err)
+
+    def test_first_heading_must_be_h2_or_h3(self):
+        got, err = self.qs("# Findings\n" + self.L)
+        self.assertEqual(got, [])
+        self.assertIn("no Findings section", err)
+
+    def test_deferred_gap_deeper_after_end_is_ignored(self):
+        # wontfix-for-A3: pins current behaviour; PR B documents one heading level.
+        got, _ = self.qs("## Findings\n" + self.L + "## Other\n### Findings\n" + self.M)
+        self.assertEqual(got, ["qa: a.py:1"])
+
+
+def _gate_nits_only_multi_section_passes(self):
+    self.run_main(["work", "set", "--issue", "ENG-1", "pr=12", "qa.verdict=approve",
+                   "qa.sha=abc123def456", "qa.report=r.md"])
+    with open("r.md", "w") as fh:
+        fh.write("## Findings\n- [nit] a.py:1 — x (open)\n## Other\n\n"
+                 "## Findings\n- [nit] b.py:2 — y (open)\n- [major] c.py:3 — z (fixed)\n")
+    code, data, _ = self.gate()
+    self.assertEqual((code, data["checks"]["threads"]["status"]), (0, "pass"))
+    with open("r.md", "a") as fh:
+        fh.write("## Other\n### Findings\n## Findings\n- [major] d.py:4 — w (open)\n")
+    code, data, _ = self.gate()
+    self.assertEqual((code, data["checks"]["threads"]["status"]), (4, "fail"))
+
+
+MergeGateTest.test_nits_only_multi_section_passes = _gate_nits_only_multi_section_passes
